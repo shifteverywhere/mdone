@@ -4,8 +4,16 @@ A Markdown-native, AI-agent-friendly CLI todo manager. Tasks live in a plain `ta
 
 ## Install
 
+**Via pip (directly from GitHub):**
+
 ```bash
-git clone https://github.com/<you>/mdone.git
+pip install git+https://github.com/shifteverywhere/mdone.git
+```
+
+**From source:**
+
+```bash
+git clone https://github.com/shifteverywhere/mdone.git
 cd mdone
 pip install .
 ```
