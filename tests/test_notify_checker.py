@@ -1,0 +1,211 @@
+"""
+Tests for todo.notify.checker — pending detection, lead-time parsing,
+.notified state management.
+"""
+
+import pytest
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from todo.models import Task
+from todo.notify.checker import (
+    _parse_lead,
+    _parse_due,
+    build_pending,
+    load_notified,
+    mark_sent,
+    reset_notified,
+)
+
+
+@pytest.fixture(autouse=True)
+def isolated_todo_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("TODO_DIR", str(tmp_path))
+
+
+NOW = datetime(2026, 4, 13, 10, 0)   # fixed reference
+
+
+def _task(**kwargs) -> Task:
+    defaults = dict(title="Task", id="aaa00001", due="2026-04-13T10:30", notify="30m")
+    defaults.update(kwargs)
+    return Task(**defaults)
+
+
+# ---------------------------------------------------------------------------
+# _parse_lead
+# ---------------------------------------------------------------------------
+
+class TestParseLead:
+    def test_minutes(self):
+        assert _parse_lead("30m") == timedelta(minutes=30)
+
+    def test_hours(self):
+        assert _parse_lead("2h") == timedelta(hours=2)
+
+    def test_days(self):
+        assert _parse_lead("1d") == timedelta(days=1)
+
+    def test_case_insensitive(self):
+        assert _parse_lead("1H") == timedelta(hours=1)
+        assert _parse_lead("30M") == timedelta(minutes=30)
+
+    def test_invalid_returns_none(self):
+        assert _parse_lead("soon") is None
+        assert _parse_lead("") is None
+
+
+# ---------------------------------------------------------------------------
+# _parse_due
+# ---------------------------------------------------------------------------
+
+class TestParseDue:
+    def test_date_becomes_midnight(self):
+        dt = _parse_due("2026-04-13")
+        assert dt == datetime(2026, 4, 13, 0, 0)
+
+    def test_datetime_preserved(self):
+        dt = _parse_due("2026-04-13T14:30")
+        assert dt == datetime(2026, 4, 13, 14, 30)
+
+    def test_invalid_returns_none(self):
+        assert _parse_due("not-a-date") is None
+
+
+# ---------------------------------------------------------------------------
+# build_pending
+# ---------------------------------------------------------------------------
+
+class TestBuildPending:
+    def test_task_in_window_is_pending(self):
+        # due 10:30, notify 30m → window opens at 10:00 → NOW is exactly 10:00
+        task = _task(id="aaa00001", due="2026-04-13T10:30", notify="30m")
+        result = build_pending([task], {}, now=NOW)
+        assert len(result) == 1
+        assert result[0]["id"] == "aaa00001"
+
+    def test_task_before_window_not_pending(self):
+        # due 11:30, notify 30m → window opens at 11:00 → NOW=10:00 too early
+        task = _task(id="aaa00001", due="2026-04-13T11:30", notify="30m")
+        result = build_pending([task], {}, now=NOW)
+        assert result == []
+
+    def test_already_notified_excluded(self):
+        task = _task(id="aaa00001", due="2026-04-13T10:30", notify="30m")
+        result = build_pending([task], {"aaa00001": "2026-04-13T10:00"}, now=NOW)
+        assert result == []
+
+    def test_done_task_excluded(self):
+        task = _task(id="aaa00001", due="2026-04-13T10:30", notify="30m", done=True)
+        result = build_pending([task], {}, now=NOW)
+        assert result == []
+
+    def test_snoozed_task_excluded(self):
+        task = _task(id="aaa00001", due="2026-04-13T10:30", notify="30m",
+                     snooze="2099-12-31T23:59")
+        result = build_pending([task], {}, now=NOW)
+        assert result == []
+
+    def test_no_due_excluded(self):
+        task = _task(id="aaa00001", due=None, notify="30m")
+        result = build_pending([task], {}, now=NOW)
+        assert result == []
+
+    def test_overdue_no_notify_surfaces(self):
+        # No notify field but task is overdue → still surfaces
+        task = _task(id="aaa00001", due="2026-04-12", notify=None)
+        result = build_pending([task], {}, now=NOW)
+        assert len(result) == 1
+        assert result[0]["overdue"] is True
+
+    def test_future_no_notify_not_pending(self):
+        task = _task(id="aaa00001", due="2099-12-31", notify=None)
+        result = build_pending([task], {}, now=NOW)
+        assert result == []
+
+    def test_payload_fields(self):
+        task = _task(id="aaa00001", due="2026-04-13T10:30", notify="30m",
+                     priority=1, tags=["work"])
+        result = build_pending([task], {}, now=NOW)
+        p = result[0]
+        assert p["id"] == "aaa00001"
+        assert p["title"] == "Task"
+        assert p["due"] == "2026-04-13T10:30"
+        assert p["notify"] == "30m"
+        assert p["priority"] == 1
+        assert p["tags"] == ["work"]
+        assert isinstance(p["overdue"], bool)
+        assert isinstance(p["minutes_until_due"], int)
+
+    def test_overdue_flag_true_when_past(self):
+        task = _task(id="aaa00001", due="2026-04-13T09:00", notify="30m")
+        result = build_pending([task], {}, now=NOW)
+        assert result[0]["overdue"] is True
+
+    def test_overdue_flag_false_when_future(self):
+        task = _task(id="aaa00001", due="2026-04-13T10:30", notify="30m")
+        result = build_pending([task], {}, now=NOW)
+        assert result[0]["overdue"] is False
+
+    def test_minutes_until_due_negative_when_overdue(self):
+        task = _task(id="aaa00001", due="2026-04-13T09:00", notify="1h")
+        result = build_pending([task], {}, now=NOW)
+        assert result[0]["minutes_until_due"] < 0
+
+    def test_sorted_overdue_first(self):
+        t1 = _task(id="aaa00001", due="2026-04-13T10:30", notify="30m")  # not yet overdue
+        t2 = _task(id="bbb00002", due="2026-04-13T09:00", notify="1h")   # overdue
+        result = build_pending([t1, t2], {}, now=NOW)
+        assert result[0]["id"] == "bbb00002"   # overdue comes first
+
+    def test_multiple_tasks(self):
+        tasks = [
+            _task(id="aaa00001", due="2026-04-13T10:30", notify="30m"),
+            _task(id="bbb00002", due="2026-04-13T10:30", notify="30m"),
+        ]
+        result = build_pending(tasks, {}, now=NOW)
+        assert len(result) == 2
+
+
+# ---------------------------------------------------------------------------
+# .notified state — mark_sent / load_notified / reset_notified
+# ---------------------------------------------------------------------------
+
+class TestNotifiedState:
+    def test_mark_then_load(self):
+        mark_sent(["abc12345"])
+        notified = load_notified()
+        assert "abc12345" in notified
+
+    def test_mark_multiple(self):
+        mark_sent(["aaa00001", "bbb00002"])
+        notified = load_notified()
+        assert "aaa00001" in notified
+        assert "bbb00002" in notified
+
+    def test_load_empty(self):
+        assert load_notified() == {}
+
+    def test_reset_all(self):
+        mark_sent(["aaa00001", "bbb00002"])
+        reset_notified()
+        assert load_notified() == {}
+
+    def test_reset_single(self):
+        mark_sent(["aaa00001", "bbb00002"])
+        reset_notified("aaa00001")
+        notified = load_notified()
+        assert "aaa00001" not in notified
+        assert "bbb00002" in notified
+
+    def test_reset_nonexistent_id_is_safe(self):
+        mark_sent(["aaa00001"])
+        reset_notified("zzz99999")   # does not exist — no crash
+        assert "aaa00001" in load_notified()
+
+    def test_marked_tasks_excluded_from_pending(self):
+        task = _task(id="aaa00001", due="2026-04-13T10:30", notify="30m")
+        mark_sent(["aaa00001"])
+        notified = load_notified()
+        result = build_pending([task], notified, now=NOW)
+        assert result == []
