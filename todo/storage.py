@@ -19,6 +19,8 @@ from .parser import parse_line, serialize_task
 SECTIONS = ["inbox", "today", "upcoming", "someday", "waiting"]
 DEFAULT_SECTION = "inbox"
 
+_FOOTER = "\n---\nPowered by ¯\\(ツ)/¯mdone\n"
+
 
 def get_todo_dir() -> Path:
     custom = os.environ.get("TODO_DIR")
@@ -36,7 +38,7 @@ def _archive_file() -> Path:
 def _initial_tasks_content() -> str:
     """Return the default tasks.md content: one header per section, all empty."""
     blocks = [f"## {s.capitalize()}" for s in SECTIONS]
-    return "\n\n".join(blocks) + "\n"
+    return "\n\n".join(blocks) + _FOOTER
 
 
 def _ensure_dir() -> None:
@@ -85,7 +87,7 @@ def write_tasks(tasks: List[Task]) -> None:
         lines.extend(serialize_task(t) for t in by_section[section])
         blocks.append("\n".join(lines))
 
-    _tasks_file().write_text("\n\n".join(blocks) + "\n")
+    _tasks_file().write_text("\n\n".join(blocks) + _FOOTER)
 
 
 # ---------------------------------------------------------------------------
@@ -127,9 +129,13 @@ def delete_task(task_id: str) -> bool:
 
 
 def archive_task(task: Task) -> None:
-    """Append the task (marked done) to archive.md."""
+    """Append the task (marked done) to archive.md, keeping the footer at the end."""
     _ensure_dir()
     task.done = True
     line = serialize_task(task)
-    with _archive_file().open("a") as f:
-        f.write(line + "\n")
+    archive = _archive_file()
+    existing = archive.read_text() if archive.exists() else ""
+    # Strip trailing footer if present so we can re-add it after the new line
+    if existing.endswith(_FOOTER):
+        existing = existing[: -len(_FOOTER)]
+    archive.write_text(existing + line + "\n" + _FOOTER)
