@@ -699,12 +699,19 @@ def cmd_organize(sort_by, dry_run, as_json):
     tasks = read_tasks()
     today_str = date.today().isoformat()
     moved = []
+    archived = []
 
-    for task in tasks:
-        if task.done or is_snoozed(task):
+    # Separate tasks manually marked done in the markdown file
+    to_archive = [t for t in tasks if t.done]
+    active = [t for t in tasks if not t.done]
+
+    for task in to_archive:
+        archived.append({"id": task.id, "title": task.title, "section": task.section})
+
+    # Reassign sections for active tasks based on due dates
+    for task in active:
+        if is_snoozed(task) or not task.due:
             continue
-        if not task.due:
-            continue  # no due date — leave wherever it is
 
         due_date = task.due.split("T")[0]
         target = "today" if due_date <= today_str else "upcoming"
@@ -721,15 +728,21 @@ def cmd_organize(sort_by, dry_run, as_json):
             })
 
     if sort_by:
-        tasks = _sort_within_sections(tasks, sort_by)
+        active = _sort_within_sections(active, sort_by)
 
     if not dry_run:
-        write_tasks(tasks)
+        for task in to_archive:
+            archive_task(task)
+        write_tasks(active)
 
     if as_json or dry_run:
-        result = {"moved": moved, "sorted_by": sort_by}
+        result = {"archived": archived, "moved": moved, "sorted_by": sort_by}
         click.echo(json.dumps(result, indent=2))
     else:
+        if archived:
+            for a in archived:
+                click.echo(f"  {a['id']}  {a['title']}  → archived")
+            click.echo(f"Archived {len(archived)} completed task(s).")
         if not moved:
             click.echo("All tasks are already in the right section.")
         else:

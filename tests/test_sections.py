@@ -257,6 +257,66 @@ class TestOrganize:
         t = next(t for t in tasks if t.title == "Waiting task")
         assert t.section == "today"
 
+    def test_organize_archives_manually_done_task(self, runner):
+        data = _add(runner, "Finish report")
+        task_id = data["id"]
+        # Manually mark it done in the file
+        content = _tasks_file().read_text()
+        _tasks_file().write_text(content.replace(
+            f"- [ ] Finish report id:{task_id}",
+            f"- [x] Finish report id:{task_id}"
+        ))
+        runner.invoke(cli, ["organize"])
+        # No longer in active tasks
+        tasks = read_tasks()
+        assert not any(t.id == task_id for t in tasks)
+        # Present in archive
+        archive = (_tasks_file().parent / "archive.md").read_text()
+        assert task_id in archive
+
+    def test_organize_archived_in_json_output(self, runner):
+        data = _add(runner, "Finish report")
+        task_id = data["id"]
+        content = _tasks_file().read_text()
+        _tasks_file().write_text(content.replace(
+            f"- [ ] Finish report id:{task_id}",
+            f"- [x] Finish report id:{task_id}"
+        ))
+        result = runner.invoke(cli, ["organize", "--json"])
+        assert result.exit_code == 0
+        out = json.loads(result.output)
+        assert "archived" in out
+        assert out["archived"][0]["id"] == task_id
+        assert out["archived"][0]["title"] == "Finish report"
+
+    def test_organize_dry_run_does_not_archive(self, runner):
+        data = _add(runner, "Finish report")
+        task_id = data["id"]
+        content = _tasks_file().read_text()
+        _tasks_file().write_text(content.replace(
+            f"- [ ] Finish report id:{task_id}",
+            f"- [x] Finish report id:{task_id}"
+        ))
+        result = runner.invoke(cli, ["organize", "--dry-run"])
+        assert result.exit_code == 0
+        out = json.loads(result.output)
+        assert out["archived"][0]["id"] == task_id
+        # File unchanged — task still present (still marked done, not removed)
+        tasks = read_tasks()
+        assert any(t.id == task_id for t in tasks)
+
+    def test_organize_text_output_mentions_archived(self, runner):
+        data = _add(runner, "Finish report")
+        task_id = data["id"]
+        content = _tasks_file().read_text()
+        _tasks_file().write_text(content.replace(
+            f"- [ ] Finish report id:{task_id}",
+            f"- [x] Finish report id:{task_id}"
+        ))
+        result = runner.invoke(cli, ["organize"])
+        assert result.exit_code == 0
+        assert "archived" in result.output.lower()
+
 
 # ---------------------------------------------------------------------------
 # CLI: organize --sort
