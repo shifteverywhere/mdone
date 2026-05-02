@@ -5,7 +5,7 @@ Integration tests for the `notify` and `config` CLI commands.
 import json
 import pytest
 from click.testing import CliRunner
-from todo.cli import cli
+from todo.cli import cli, SCHEMA_VERSION
 from todo.storage import add_task
 from todo.models import Task
 from todo.notify.checker import mark_sent, load_notified
@@ -21,10 +21,16 @@ def runner():
     return CliRunner()
 
 
+def _unwrap(output: str) -> object:
+    response = json.loads(output)
+    assert response["schema_version"] == SCHEMA_VERSION
+    return response["data"]
+
+
 def _add_task(runner, task_string):
     result = runner.invoke(cli, ["add", task_string, "--json"])
     assert result.exit_code == 0
-    return json.loads(result.output)
+    return _unwrap(result.output)
 
 
 # ---------------------------------------------------------------------------
@@ -39,13 +45,13 @@ class TestNotifyCheck:
     def test_no_pending_json_returns_empty_list(self, runner):
         result = runner.invoke(cli, ["notify", "--check", "--json"])
         assert result.exit_code == 0
-        assert json.loads(result.output) == []
+        assert _unwrap(result.output) == []
 
     def test_overdue_task_appears_in_check(self, runner):
         # No notify field but overdue → still surfaces
         add_task(Task(title="Old task", id="old00001", due="2020-01-01"))
         result = runner.invoke(cli, ["notify", "--check", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert any(p["id"] == "old00001" for p in data)
 
     def test_in_window_task_appears(self, runner):
@@ -53,28 +59,28 @@ class TestNotifyCheck:
         add_task(Task(title="Past task", id="pst00001",
                       due="2020-01-01", notify="1d"))
         result = runner.invoke(cli, ["notify", "--check", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert any(p["id"] == "pst00001" for p in data)
 
     def test_future_task_not_in_window(self, runner):
         add_task(Task(title="Far future", id="fut00001",
                       due="2099-12-31", notify="30m"))
         result = runner.invoke(cli, ["notify", "--check", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert not any(p["id"] == "fut00001" for p in data)
 
     def test_already_notified_not_in_check(self, runner):
         add_task(Task(title="Old task", id="old00002", due="2020-01-01"))
         mark_sent(["old00002"])
         result = runner.invoke(cli, ["notify", "--check", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert not any(p["id"] == "old00002" for p in data)
 
     def test_check_payload_fields(self, runner):
         add_task(Task(title="Old task", id="old00003", due="2020-01-01",
                       notify="1d", priority=1, tags=["work"]))
         result = runner.invoke(cli, ["notify", "--check", "--json"])
-        p = json.loads(result.output)[0]
+        p = _unwrap(result.output)[0]
         for field in ("id", "title", "due", "priority", "tags",
                       "overdue", "minutes_until_due"):
             assert field in p
@@ -109,14 +115,14 @@ class TestMarkSent:
         result = runner.invoke(
             cli, ["notify", "--mark-sent", "abc12345", "--json"]
         )
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert "abc12345" in data["marked_sent"]
 
     def test_marked_task_excluded_from_check(self, runner):
         add_task(Task(title="Old task", id="old00001", due="2020-01-01"))
         runner.invoke(cli, ["notify", "--mark-sent", "old00001"])
         result = runner.invoke(cli, ["notify", "--check", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert not any(p["id"] == "old00001" for p in data)
 
 
@@ -142,7 +148,7 @@ class TestReset:
         mark_sent(["old00001"])
         runner.invoke(cli, ["notify", "--reset-all"])
         result = runner.invoke(cli, ["notify", "--check", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert any(p["id"] == "old00001" for p in data)
 
 
@@ -215,12 +221,12 @@ class TestConfigCommand:
     def test_show_json_is_valid(self, runner):
         result = runner.invoke(cli, ["config", "--show", "--json"])
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert "notifications" in data
 
     def test_show_json_has_backend_key(self, runner):
         result = runner.invoke(cli, ["config", "--show", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert "backend" in data["notifications"]
 
     def test_show_reflects_custom_config(self, runner, tmp_path):
@@ -228,6 +234,6 @@ class TestConfigCommand:
             '[notifications]\nbackend = "slack"\npoll_interval = 30\n'
         )
         result = runner.invoke(cli, ["config", "--show", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["notifications"]["backend"] == "slack"
         assert data["notifications"]["poll_interval"] == 30

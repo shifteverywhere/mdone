@@ -3,7 +3,7 @@
 import json
 import pytest
 from click.testing import CliRunner
-from todo.cli import cli
+from todo.cli import cli, SCHEMA_VERSION
 from todo.models import Task
 from todo.storage import (
     SECTIONS,
@@ -25,13 +25,19 @@ def runner():
     return CliRunner()
 
 
+def _unwrap(output: str) -> object:
+    response = json.loads(output)
+    assert response["schema_version"] == SCHEMA_VERSION
+    return response["data"]
+
+
 def _add(runner, task_string, **flags):
     args = ["add", task_string, "--json"]
     for k, v in flags.items():
         args += [f"--{k}", v]
     result = runner.invoke(cli, args)
     assert result.exit_code == 0, result.output
-    return json.loads(result.output)
+    return _unwrap(result.output)
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +148,7 @@ class TestAddSection:
     def test_add_dry_run_includes_section(self, runner):
         result = runner.invoke(cli, ["add", "Task", "--dry-run"])
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert "section" in data
 
 
@@ -156,7 +162,7 @@ class TestListSection:
         _add(runner, "Future task due:2099-12-31")
         result = runner.invoke(cli, ["list", "--section", "upcoming", "--json"])
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert len(data) == 1
         assert data[0]["section"] == "upcoming"
 
@@ -167,7 +173,7 @@ class TestListSection:
     def test_list_json_includes_section(self, runner):
         _add(runner, "Task A")
         result = runner.invoke(cli, ["list", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert "section" in data[0]
 
     def test_list_text_shows_section_headers(self, runner):
@@ -225,7 +231,7 @@ class TestOrganize:
         _add(runner, "Future task due:2099-01-01", section="inbox")
         result = runner.invoke(cli, ["organize", "--dry-run"])
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert len(data["moved"]) == 1
         assert data["moved"][0]["to"] == "upcoming"
         # But task is still in inbox (dry-run)
@@ -237,7 +243,7 @@ class TestOrganize:
         _add(runner, "Future task due:2099-01-01", section="inbox")
         result = runner.invoke(cli, ["organize", "--json"])
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["moved"][0]["from"] == "inbox"
         assert data["moved"][0]["to"] == "upcoming"
         assert "id" in data["moved"][0]
@@ -284,7 +290,7 @@ class TestOrganize:
         ))
         result = runner.invoke(cli, ["organize", "--json"])
         assert result.exit_code == 0
-        out = json.loads(result.output)
+        out = _unwrap(result.output)
         assert "archived" in out
         assert out["archived"][0]["id"] == task_id
         assert out["archived"][0]["title"] == "Finish report"
@@ -299,7 +305,7 @@ class TestOrganize:
         ))
         result = runner.invoke(cli, ["organize", "--dry-run"])
         assert result.exit_code == 0
-        out = json.loads(result.output)
+        out = _unwrap(result.output)
         assert out["archived"][0]["id"] == task_id
         # File unchanged — task still present (still marked done, not removed)
         tasks = read_tasks()
@@ -380,7 +386,7 @@ class TestOrganizeSort:
         _add(runner, "Task B priority:1")
         result = runner.invoke(cli, ["organize", "--sort", "priority", "--json"])
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["sorted_by"] == "priority"
         assert "moved" in data
 
@@ -424,7 +430,7 @@ class TestEditSection:
         data = _add(runner, "Move me")
         result = runner.invoke(cli, ["edit", data["id"], "--set", "section:someday", "--json"])
         assert result.exit_code == 0
-        updated = json.loads(result.output)
+        updated = _unwrap(result.output)
         assert updated["section"] == "someday"
 
     def test_edit_set_invalid_section_exits_2(self, runner):

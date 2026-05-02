@@ -8,7 +8,7 @@ Phase 5 polish tests:
 import json
 import pytest
 from click.testing import CliRunner
-from todo.cli import cli
+from todo.cli import cli, SCHEMA_VERSION
 from todo.storage import add_task, read_tasks, _archive_file
 from todo.models import Task
 from todo.config import (
@@ -27,10 +27,16 @@ def runner():
     return CliRunner()
 
 
+def _unwrap(output: str) -> object:
+    response = json.loads(output)
+    assert response["schema_version"] == SCHEMA_VERSION
+    return response["data"]
+
+
 def _add(runner, task_string):
     result = runner.invoke(cli, ["add", task_string, "--json"])
     assert result.exit_code == 0
-    return json.loads(result.output)
+    return _unwrap(result.output)
 
 
 # ---------------------------------------------------------------------------
@@ -50,14 +56,14 @@ class TestDryRunDone:
     def test_dry_run_returns_json(self, runner):
         d = _add(runner, "Task")
         result = runner.invoke(cli, ["done", d["id"], "--dry-run"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data[0]["completed"]["id"] == d["id"]
         assert data[0]["dry_run"] is True
 
     def test_dry_run_shows_spawned_for_recurring(self, runner):
         d = _add(runner, "Weekly task due:2026-04-13 recur:weekly")
         result = runner.invoke(cli, ["done", d["id"], "--dry-run"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data[0]["spawned"] is not None
         assert data[0]["spawned"]["due"] == "2026-04-20"
         # Original task still active
@@ -67,7 +73,7 @@ class TestDryRunDone:
         d1 = _add(runner, "Task 1")
         d2 = _add(runner, "Task 2")
         result = runner.invoke(cli, ["done", d1["id"], d2["id"], "--dry-run"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert len(data) == 2
         assert len(read_tasks()) == 2   # nothing removed
 
@@ -86,7 +92,7 @@ class TestDryRunEdit:
     def test_dry_run_returns_preview_json(self, runner):
         d = _add(runner, "Original title")
         result = runner.invoke(cli, ["edit", d["id"], "New title", "--dry-run"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["title"] == "New title"
         assert data["id"] == d["id"]
 
@@ -95,7 +101,7 @@ class TestDryRunEdit:
         result = runner.invoke(
             cli, ["edit", d["id"], "--set", "priority:1", "--dry-run"]
         )
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["priority"] == 1
         # Still priority 4 on disk
         assert read_tasks()[0].priority == 4
@@ -115,7 +121,7 @@ class TestDryRunDelete:
     def test_dry_run_returns_json(self, runner):
         d = _add(runner, "Task")
         result = runner.invoke(cli, ["delete", d["id"], "--dry-run"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["deleted"] == d["id"]
         assert data["dry_run"] is True
         assert data["task"]["id"] == d["id"]
@@ -140,7 +146,7 @@ class TestDryRunSnooze:
     def test_dry_run_returns_preview_json(self, runner):
         d = _add(runner, "Alert task")
         result = runner.invoke(cli, ["snooze", d["id"], "2099-12-31T23:59", "--dry-run"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["snooze"] == "2099-12-31T23:59"
 
     def test_dry_run_clear_does_not_persist(self, runner):
@@ -165,45 +171,45 @@ class TestConfigDefaults:
     def test_default_tags_applied(self, runner, tmp_path):
         self._write_config(tmp_path, '[tags]\ndefault_tags = ["work", "q2"]\n')
         result = runner.invoke(cli, ["add", "Simple task", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert "work" in data["tags"]
         assert "q2" in data["tags"]
 
     def test_default_tags_not_duplicated(self, runner, tmp_path):
         self._write_config(tmp_path, '[tags]\ndefault_tags = ["work"]\n')
         result = runner.invoke(cli, ["add", "Task @work", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["tags"].count("work") == 1
 
     def test_default_priority_applied(self, runner, tmp_path):
         self._write_config(tmp_path, '[general]\ndefault_priority = 2\n')
         result = runner.invoke(cli, ["add", "Task with no priority", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["priority"] == 2
 
     def test_explicit_priority_overrides_default(self, runner, tmp_path):
         self._write_config(tmp_path, '[general]\ndefault_priority = 2\n')
         result = runner.invoke(cli, ["add", "Urgent task priority:1", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["priority"] == 1
 
     def test_default_notify_applied(self, runner, tmp_path):
         self._write_config(tmp_path,
             '[notifications]\ndefault_notify = "30m"\nbackend = "stdout"\n')
         result = runner.invoke(cli, ["add", "Task due:2099-12-31", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["notify"] == "30m"
 
     def test_explicit_notify_overrides_default(self, runner, tmp_path):
         self._write_config(tmp_path,
             '[notifications]\ndefault_notify = "30m"\nbackend = "stdout"\n')
         result = runner.invoke(cli, ["add", "Task due:2099-12-31 notify:2h", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["notify"] == "2h"
 
     def test_no_default_notify_without_config(self, runner):
         result = runner.invoke(cli, ["add", "Task", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["notify"] is None
 
 
@@ -248,7 +254,7 @@ class TestConfigHelpers:
     def test_config_init_and_show(self, runner):
         runner.invoke(cli, ["config", "--init"])
         result = runner.invoke(cli, ["config", "--show", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert "general" in data
         assert "tags" in data
         assert "notifications" in data

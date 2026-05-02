@@ -50,10 +50,29 @@ from .config import (
 from .search import search_tasks
 from .completions import detect_shell, get_script, install as install_completions
 
+# Increment when the JSON envelope or any command's data shape changes.
+SCHEMA_VERSION = 1
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _json_out(payload, pretty: bool = False) -> None:
+    """Emit a versioned JSON envelope to stdout.
+
+    Compact by default (--json); indented when pretty=True (--json-pretty).
+    All machine-readable output goes through here so the envelope stays consistent.
+    """
+    envelope = {"schema_version": SCHEMA_VERSION, "data": payload}
+    indent = 2 if pretty else None
+    click.echo(json.dumps(envelope, indent=indent))
+
+
+def _emit(obj, as_json: bool, pretty: bool = False) -> None:
+    if as_json:
+        _json_out(obj, pretty=pretty)
+
 
 def _parse_task_string(task_string: str) -> Task:
     """Parse a free-form task string and normalise the due date if present."""
@@ -64,11 +83,6 @@ def _parse_task_string(task_string: str) -> Task:
     if task.due:
         task.due = parse_due_date(task.due)
     return task
-
-
-def _emit(obj, as_json: bool) -> None:
-    if as_json:
-        click.echo(json.dumps(obj, indent=2))
 
 
 def _fmt_due(due_str: str, date_format: str) -> str:
@@ -165,8 +179,11 @@ def cli():
 )
 @click.option("--dry-run", is_flag=True,
               help="Show the parsed task as JSON without saving (useful for agents)")
-@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def cmd_add(task_string: str, natural: bool, section: str, dry_run: bool, as_json: bool) -> None:
+@click.option("--json", "as_json", is_flag=True, help="Output as compact JSON")
+@click.option("--json-pretty", "json_pretty", is_flag=True,
+              help="Output as indented JSON (for humans; implies --json)")
+def cmd_add(task_string: str, natural: bool, section: str, dry_run: bool,
+            as_json: bool, json_pretty: bool) -> None:
     """Add a new task.
 
     Tasks are automatically placed in the most appropriate section:
@@ -189,6 +206,7 @@ def cmd_add(task_string: str, natural: bool, section: str, dry_run: bool, as_jso
       todo add -n "remind me to call Alice next Friday at 3pm"
       todo add -n "urgent: fix the login bug tomorrow"
     """
+    as_json = as_json or json_pretty
     config = load_config()
 
     if natural:
@@ -222,14 +240,13 @@ def cmd_add(task_string: str, natural: bool, section: str, dry_run: bool, as_jso
     task.section = section if section else _auto_section(task)
 
     if dry_run:
-        # Always emit JSON for dry-run — it's a machine-readable preview
-        click.echo(json.dumps(task.to_dict(), indent=2))
+        _json_out(task.to_dict(), pretty=json_pretty)
         return
 
     add_task(task)
 
     if as_json:
-        _emit(task.to_dict(), as_json=True)
+        _json_out(task.to_dict(), pretty=json_pretty)
     else:
         click.echo(f"Added [{task.section}]: {task.id}  {task.title}")
 
@@ -258,8 +275,11 @@ def cmd_add(task_string: str, natural: bool, section: str, dry_run: bool, as_jso
     type=click.Choice(["priority", "due", "title"]),
     show_default=True, help="Sort order",
 )
-@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def cmd_list(tag, priority, due, overdue, show_done, show_all, section, sort, as_json):
+@click.option("--json", "as_json", is_flag=True, help="Output as compact JSON")
+@click.option("--json-pretty", "json_pretty", is_flag=True,
+              help="Output as indented JSON (for humans; implies --json)")
+def cmd_list(tag, priority, due, overdue, show_done, show_all, section, sort,
+             as_json, json_pretty):
     """List tasks with optional filters.
 
     Without --section, tasks are grouped under their section headers.
@@ -270,6 +290,7 @@ def cmd_list(tag, priority, due, overdue, show_done, show_all, section, sort, as
       todo list --section today       # only tasks in Today
       todo list --tag work            # @work tasks, grouped by section
     """
+    as_json = as_json or json_pretty
     tasks = read_tasks()
 
     # Status filter
@@ -308,7 +329,7 @@ def cmd_list(tag, priority, due, overdue, show_done, show_all, section, sort, as
     tasks.sort(key=_sort_key)
 
     if as_json:
-        _emit([t.to_dict() for t in tasks], as_json=True)
+        _json_out([t.to_dict() for t in tasks], pretty=json_pretty)
         return
 
     if not tasks:
@@ -350,12 +371,15 @@ cli.add_command(cmd_list, name="ls")
 @click.argument("task_ids", nargs=-1, required=True)
 @click.option("--dry-run", is_flag=True,
               help="Preview what would be archived/spawned without writing")
-@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def cmd_done(task_ids, dry_run, as_json):
+@click.option("--json", "as_json", is_flag=True, help="Output as compact JSON")
+@click.option("--json-pretty", "json_pretty", is_flag=True,
+              help="Output as indented JSON (for humans; implies --json)")
+def cmd_done(task_ids, dry_run, as_json, json_pretty):
     """Mark one or more tasks as complete.
 
     Recurring tasks automatically spawn their next occurrence.
     """
+    as_json = as_json or json_pretty
     results = []
     for task_id in task_ids:
         task = find_task(task_id)
@@ -378,7 +402,7 @@ def cmd_done(task_ids, dry_run, as_json):
         })
 
     if as_json or dry_run:
-        click.echo(json.dumps(results, indent=2))
+        _json_out(results, pretty=json_pretty)
     else:
         for r in results:
             click.echo(f"Done: {r['completed']['id']}  {r['completed']['title']}")
@@ -394,9 +418,12 @@ def cmd_done(task_ids, dry_run, as_json):
 @cli.command("delete")
 @click.argument("task_id")
 @click.option("--dry-run", is_flag=True, help="Preview deletion without writing")
-@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def cmd_delete(task_id, dry_run, as_json):
+@click.option("--json", "as_json", is_flag=True, help="Output as compact JSON")
+@click.option("--json-pretty", "json_pretty", is_flag=True,
+              help="Output as indented JSON (for humans; implies --json)")
+def cmd_delete(task_id, dry_run, as_json, json_pretty):
     """Delete a task permanently (no archive)."""
+    as_json = as_json or json_pretty
     task = find_task(task_id)
     if not task:
         click.echo(f"Error: task '{task_id}' not found.", err=True)
@@ -407,7 +434,7 @@ def cmd_delete(task_id, dry_run, as_json):
 
     result = {"deleted": task_id, "task": task.to_dict(), "dry_run": dry_run}
     if as_json or dry_run:
-        click.echo(json.dumps(result, indent=2))
+        _json_out(result, pretty=json_pretty)
     else:
         click.echo(f"Deleted: {task_id}")
 
@@ -427,8 +454,10 @@ cli.add_command(cmd_delete, name="rm")
     help="Set a specific field, e.g. --set priority:1  (repeatable)",
 )
 @click.option("--dry-run", is_flag=True, help="Preview the result without saving")
-@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def cmd_edit(task_id, task_string, set_fields, dry_run, as_json):
+@click.option("--json", "as_json", is_flag=True, help="Output as compact JSON")
+@click.option("--json-pretty", "json_pretty", is_flag=True,
+              help="Output as indented JSON (for humans; implies --json)")
+def cmd_edit(task_id, task_string, set_fields, dry_run, as_json, json_pretty):
     """Edit a task.
 
     \b
@@ -438,6 +467,7 @@ def cmd_edit(task_id, task_string, set_fields, dry_run, as_json):
     Update individual fields:
       todo edit abc123 --set priority:1 --set due:tomorrow
     """
+    as_json = as_json or json_pretty
     task = find_task(task_id)
     if not task:
         click.echo(f"Error: task '{task_id}' not found.", err=True)
@@ -477,7 +507,7 @@ def cmd_edit(task_id, task_string, set_fields, dry_run, as_json):
         update_task(task)
 
     if as_json or dry_run:
-        click.echo(json.dumps(task.to_dict(), indent=2))
+        _json_out(task.to_dict(), pretty=json_pretty)
     else:
         click.echo(f"Updated: {task.id}  {task.title}")
 
@@ -491,8 +521,10 @@ def cmd_edit(task_id, task_string, set_fields, dry_run, as_json):
 @click.argument("duration", required=False)
 @click.option("--clear", is_flag=True, help="Remove the snooze from a task")
 @click.option("--dry-run", is_flag=True, help="Preview without saving")
-@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def cmd_snooze(task_id, duration, clear, dry_run, as_json):
+@click.option("--json", "as_json", is_flag=True, help="Output as compact JSON")
+@click.option("--json-pretty", "json_pretty", is_flag=True,
+              help="Output as indented JSON (for humans; implies --json)")
+def cmd_snooze(task_id, duration, clear, dry_run, as_json, json_pretty):
     """Snooze a task until a given time, hiding it from the default list view.
 
     \b
@@ -502,6 +534,7 @@ def cmd_snooze(task_id, duration, clear, dry_run, as_json):
       todo snooze abc123 2026-04-20T09:00
       todo snooze abc123 --clear
     """
+    as_json = as_json or json_pretty
     task = find_task(task_id)
     if not task:
         click.echo(f"Error: task '{task_id}' not found.", err=True)
@@ -512,7 +545,7 @@ def cmd_snooze(task_id, duration, clear, dry_run, as_json):
         if not dry_run:
             update_task(task)
         if as_json or dry_run:
-            click.echo(json.dumps(task.to_dict(), indent=2))
+            _json_out(task.to_dict(), pretty=json_pretty)
         else:
             click.echo(f"Snooze cleared: {task.id}  {task.title}")
         return
@@ -531,7 +564,7 @@ def cmd_snooze(task_id, duration, clear, dry_run, as_json):
         update_task(task)
 
     if as_json or dry_run:
-        click.echo(json.dumps(task.to_dict(), indent=2))
+        _json_out(task.to_dict(), pretty=json_pretty)
     else:
         click.echo(f"Snoozed: {task.id}  {task.title}  until {task.snooze}")
 
@@ -542,14 +575,17 @@ def cmd_snooze(task_id, duration, clear, dry_run, as_json):
 
 @cli.command("recap")
 @click.option("--week", is_flag=True, help="Show the full 7-day lookahead")
-@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def cmd_recap(week, as_json):
+@click.option("--json", "as_json", is_flag=True, help="Output as compact JSON")
+@click.option("--json-pretty", "json_pretty", is_flag=True,
+              help="Output as indented JSON (for humans; implies --json)")
+def cmd_recap(week, as_json, json_pretty):
     """Summarise overdue tasks and what's due today (or this week).
 
     \b
       todo recap           # overdue + today
       todo recap --week    # overdue + next 7 days
     """
+    as_json = as_json or json_pretty
     today = date.today()
     today_str = today.isoformat()
     cutoff_str = (today + timedelta(days=7)).isoformat()
@@ -569,11 +605,11 @@ def cmd_recap(week, as_json):
         no_due = [t for t in tasks if not t.due]
 
         if as_json:
-            _emit({
+            _json_out({
                 "overdue": [t.to_dict() for t in overdue],
                 "upcoming": [t.to_dict() for t in upcoming],
                 "no_due_date": [t.to_dict() for t in no_due],
-            }, as_json=True)
+            }, pretty=json_pretty)
         else:
             _section("OVERDUE", overdue)
             label = f"UPCOMING — {today_str} → {cutoff_str}"
@@ -585,10 +621,10 @@ def cmd_recap(week, as_json):
         )
 
         if as_json:
-            _emit({
+            _json_out({
                 "overdue": [t.to_dict() for t in overdue],
                 "today": [t.to_dict() for t in today_tasks],
-            }, as_json=True)
+            }, pretty=json_pretty)
         else:
             _section("OVERDUE", overdue)
             _section(f"TODAY — {today.strftime('%a %b %d')}", today_tasks)
@@ -600,8 +636,10 @@ def cmd_recap(week, as_json):
 
 @cli.command("triage")
 @click.option("--json", "as_json", is_flag=True,
-              help="Non-interactive: print untriaged tasks as JSON and exit")
-def cmd_triage(as_json):
+              help="Non-interactive: print untriaged tasks as compact JSON and exit")
+@click.option("--json-pretty", "json_pretty", is_flag=True,
+              help="Output as indented JSON (for humans; implies --json)")
+def cmd_triage(as_json, json_pretty):
     """Interactively assign due dates and priorities to unscheduled tasks.
 
     A task needs triage when it has no due date AND no priority set (p4).
@@ -610,13 +648,14 @@ def cmd_triage(as_json):
       Interactive (human):   todo triage
       Agent / script:        todo triage --json
     """
+    as_json = as_json or json_pretty
     candidates = [
         t for t in read_tasks()
         if not t.done and not is_snoozed(t) and t.due is None and t.priority == 4
     ]
 
     if as_json:
-        _emit([t.to_dict() for t in candidates], as_json=True)
+        _json_out([t.to_dict() for t in candidates], pretty=json_pretty)
         return
 
     if not candidates:
@@ -672,8 +711,10 @@ def cmd_triage(as_json):
               type=click.Choice(["priority", "due", "title"]),
               help="Sort tasks within each section after organizing")
 @click.option("--dry-run", is_flag=True, help="Preview moves/sort without writing")
-@click.option("--json", "as_json", is_flag=True, help="Output result as JSON")
-def cmd_organize(sort_by, dry_run, as_json):
+@click.option("--json", "as_json", is_flag=True, help="Output result as compact JSON")
+@click.option("--json-pretty", "json_pretty", is_flag=True,
+              help="Output as indented JSON (for humans; implies --json)")
+def cmd_organize(sort_by, dry_run, as_json, json_pretty):
     """Auto-assign tasks to sections based on their due dates, and optionally
     sort tasks within each section.
 
@@ -696,6 +737,7 @@ def cmd_organize(sort_by, dry_run, as_json):
       todo organize --sort title --dry-run  # preview without writing
       todo organize --sort priority --json  # machine-readable output
     """
+    as_json = as_json or json_pretty
     tasks = read_tasks()
     today_str = date.today().isoformat()
     moved = []
@@ -737,7 +779,7 @@ def cmd_organize(sort_by, dry_run, as_json):
 
     if as_json or dry_run:
         result = {"archived": archived, "moved": moved, "sorted_by": sort_by}
-        click.echo(json.dumps(result, indent=2))
+        _json_out(result, pretty=json_pretty)
     else:
         if archived:
             for a in archived:
@@ -773,9 +815,11 @@ def cmd_organize(sort_by, dry_run, as_json):
               help="Run as a poll loop — fires notifications via the configured backend")
 @click.option("--interval",   default=None, type=int, metavar="SECONDS",
               help="Override daemon poll interval (seconds)")
-@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option("--json", "as_json", is_flag=True, help="Output as compact JSON")
+@click.option("--json-pretty", "json_pretty", is_flag=True,
+              help="Output as indented JSON (for humans; implies --json)")
 def cmd_notify(check, mark_sent_ids, reset_id, reset_all, send_id,
-               backend, daemon, interval, as_json):
+               backend, daemon, interval, as_json, json_pretty):
     """Manage and deliver task notifications.
 
     \b
@@ -793,6 +837,7 @@ def cmd_notify(check, mark_sent_ids, reset_id, reset_all, send_id,
       todo notify --daemon
       todo notify --daemon --interval 30
     """
+    as_json = as_json or json_pretty
     config = load_config()
 
     # ── reset ────────────────────────────────────────────────────────────
@@ -810,7 +855,7 @@ def cmd_notify(check, mark_sent_ids, reset_id, reset_all, send_id,
     if mark_sent_ids:
         mark_sent(list(mark_sent_ids))
         if as_json:
-            click.echo(json.dumps({"marked_sent": list(mark_sent_ids)}, indent=2))
+            _json_out({"marked_sent": list(mark_sent_ids)}, pretty=json_pretty)
         else:
             for tid in mark_sent_ids:
                 click.echo(f"Marked sent: {tid}")
@@ -820,7 +865,7 @@ def cmd_notify(check, mark_sent_ids, reset_id, reset_all, send_id,
     if check:
         pending = get_pending()
         if as_json:
-            click.echo(json.dumps(pending, indent=2))
+            _json_out(pending, pretty=json_pretty)
         else:
             if not pending:
                 click.echo("No pending notifications.")
@@ -867,6 +912,8 @@ def cmd_notify(check, mark_sent_ids, reset_id, reset_all, send_id,
             mark_sent([send_id])
             if not as_json:
                 click.echo(f"Sent via {backend_name}: {send_id}")
+            else:
+                _json_out({"sent": send_id, "backend": backend_name}, pretty=json_pretty)
         else:
             click.echo(f"Delivery failed via {backend_name}.", err=True)
             sys.exit(1)
@@ -911,14 +958,18 @@ def cmd_notify(check, mark_sent_ids, reset_id, reset_all, send_id,
 @click.option("--init", is_flag=True,
               help="Write a default config.toml to TODO_DIR if one doesn't exist")
 @click.option("--show", is_flag=True, help="Print the current merged configuration")
-@click.option("--json", "as_json", is_flag=True, help="Output as JSON (with --show)")
-def cmd_config(init, show, as_json):
+@click.option("--json", "as_json", is_flag=True, help="Output as compact JSON (with --show)")
+@click.option("--json-pretty", "json_pretty", is_flag=True,
+              help="Output as indented JSON (for humans; implies --json)")
+def cmd_config(init, show, as_json, json_pretty):
     """Manage the todo configuration file.
 
     \b
       todo config --init    # create ~/.todo/config.toml with commented defaults
       todo config --show    # print the current merged configuration
     """
+    as_json = as_json or json_pretty
+
     if init:
         path = write_default_config()
         click.echo(f"Config written to: {path}")
@@ -927,7 +978,7 @@ def cmd_config(init, show, as_json):
     if show:
         cfg = load_config()
         if as_json:
-            click.echo(json.dumps(cfg, indent=2))
+            _json_out(cfg, pretty=json_pretty)
         else:
             # Pretty-print sections
             for section, value in cfg.items():
@@ -958,8 +1009,10 @@ def cmd_config(init, show, as_json):
 @click.option("--tag", "-t", default=None, help="Restrict to tasks with this @tag")
 @click.option("--priority", "-p", type=int, default=None,
               help="Restrict to tasks with this priority")
-@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def cmd_search(query, include_archive, tag, priority, as_json):
+@click.option("--json", "as_json", is_flag=True, help="Output as compact JSON")
+@click.option("--json-pretty", "json_pretty", is_flag=True,
+              help="Output as indented JSON (for humans; implies --json)")
+def cmd_search(query, include_archive, tag, priority, as_json, json_pretty):
     """Full-text search across tasks.
 
     \b
@@ -972,6 +1025,7 @@ def cmd_search(query, include_archive, tag, priority, as_json):
     from .storage import _archive_file, _ensure_dir
     from .parser import parse_line as _parse_line
 
+    as_json = as_json or json_pretty
     tasks = read_tasks()
 
     if include_archive:
@@ -992,12 +1046,12 @@ def cmd_search(query, include_archive, tag, priority, as_json):
     results = search_tasks(query, tasks)
 
     if as_json:
-        click.echo(json.dumps(
+        _json_out(
             [{"score": r.score,
               "matched_fields": r.matched_fields,
               "task": r.task.to_dict()} for r in results],
-            indent=2,
-        ))
+            pretty=json_pretty,
+        )
         return
 
     if not results:

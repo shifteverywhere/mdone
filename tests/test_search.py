@@ -161,8 +161,14 @@ class TestSearchTasks:
 import json
 import pytest
 from click.testing import CliRunner
-from todo.cli import cli
+from todo.cli import cli, SCHEMA_VERSION
 from todo.storage import add_task, archive_task
+
+
+def _unwrap(output: str) -> object:
+    response = json.loads(output)
+    assert response["schema_version"] == SCHEMA_VERSION
+    return response["data"]
 
 
 @pytest.fixture(autouse=True)
@@ -191,7 +197,7 @@ class TestSearchCommand:
         add_task(Task(title="Call dentist", id="aaa00001", tags=["health"]))
         result = runner.invoke(cli, ["search", "dentist", "--json"])
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data[0]["task"]["id"] == "aaa00001"
         assert "score" in data[0]
         assert "matched_fields" in data[0]
@@ -200,7 +206,7 @@ class TestSearchCommand:
         add_task(Task(title="Work meeting", id="aaa00001", tags=["work"]))
         add_task(Task(title="Personal meeting", id="bbb00002", tags=["personal"]))
         result = runner.invoke(cli, ["search", "meeting", "--tag", "work", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert len(data) == 1
         assert data[0]["task"]["id"] == "aaa00001"
 
@@ -208,7 +214,7 @@ class TestSearchCommand:
         add_task(Task(title="Urgent meeting", id="aaa00001", priority=1))
         add_task(Task(title="Normal meeting", id="bbb00002", priority=4))
         result = runner.invoke(cli, ["search", "meeting", "--priority", "1", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert len(data) == 1
         assert data[0]["task"]["id"] == "aaa00001"
 
@@ -229,5 +235,5 @@ class TestSearchCommand:
         add_task(Task(title="Urgent meeting today", id="aaa00001", tags=[]))
         add_task(Task(title="Meeting later", id="bbb00002", tags=[]))
         result = runner.invoke(cli, ["search", "urgent meeting", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data[0]["task"]["id"] == "aaa00001"

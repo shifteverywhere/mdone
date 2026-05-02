@@ -49,7 +49,7 @@ Key design principles:
 - **Sections**: tasks are grouped under `## Inbox`, `## Today`, `## Upcoming`, `## Someday`, and `## Waiting` — auto-assigned from due dates, overridable at any time
 - **Pull model for agents**: no background daemon required — agents call `mdone notify --check --json`, then dispatch notifications themselves
 - **Markdown as source of truth**: files are hand-editable; the CLI reads and writes the same format
-- **Composable**: every output mode has a `--json` flag returning stable, documented JSON
+- **Composable**: every output mode has a `--json` flag returning stable, versioned JSON; `--json-pretty` adds indentation for human inspection
 - **Zero network calls at rest**: all data is local; external services (email, Slack, webhooks) are only contacted on explicit notification dispatch
 
 ---
@@ -286,9 +286,21 @@ The full task mini-syntax (section is **not** part of the line — it is derived
 
 IDs are 8-character strings using lowercase letters and digits (`[a-z0-9]`), generated with `secrets.choice()` for cryptographic randomness. They are globally unique within a task list.
 
+### JSON envelope
+
+Every `--json` response is wrapped in a versioned envelope:
+
+```json
+{"schema_version": 1, "data": <payload>}
+```
+
+`schema_version` is a monotonically increasing integer. Agents should assert `schema_version == 1` and read `data` for the actual payload. The envelope never changes shape; only `data` varies by command.
+
+`--json` outputs compact (single-line) JSON. `--json-pretty` outputs the same envelope indented for human readability.
+
 ### Task JSON shape
 
-`to_dict()` returns all fields including `section`:
+`to_dict()` returns all fields including `section`. This object appears as the `data` payload (or inside a `data` array) in command responses:
 
 ```json
 {
@@ -338,7 +350,8 @@ mdone add [OPTIONS] TASK_STRING
 | `--natural`, `-n`             | Interpret TASK_STRING as plain English (NLP mode)                     |
 | `--section`, `-s SECTION`     | Override auto-assigned section (`inbox`/`today`/`upcoming`/`someday`/`waiting`) |
 | `--dry-run`                   | Output parsed task as JSON without saving                             |
-| `--json`                      | Output created task as JSON after saving                              |
+| `--json`                      | Output created task as compact JSON after saving                      |
+| `--json-pretty`               | Output as indented JSON (for humans; implies `--json`)                |
 
 **Section assignment**
 
@@ -387,22 +400,10 @@ If `config.toml` defines defaults, they are applied when not already set by the 
 **`--dry-run` output** (always JSON regardless of `--json` flag):
 
 ```json
-{
-  "id": "ab3xy901",
-  "title": "Buy milk",
-  "done": false,
-  "tags": ["shopping"],
-  "contexts": [],
-  "due": "2026-04-15",
-  "priority": 2,
-  "recur": null,
-  "notify": null,
-  "snooze": null,
-  "section": "today"
-}
+{"schema_version":1,"data":{"id":"ab3xy901","title":"Buy milk","done":false,"tags":["shopping"],"contexts":[],"due":"2026-04-15","priority":2,"recur":null,"notify":null,"snooze":null,"section":"today"}}
 ```
 
-**`--json` output**: same shape, written to stdout after the task is saved.
+**`--json` output**: same `data` shape, written to stdout after the task is saved. **`--json-pretty`** adds indentation to either.
 
 **Text output**:
 
@@ -435,7 +436,8 @@ mdone ls   [OPTIONS]
 | `--all`                       | Include snoozed tasks (hidden by default)        |
 | `--section`, `-s SECTION`     | Filter to one section; output is flat (no header)|
 | `--sort FIELD`                | Sort output by `priority` (default), `due`, or `title` — display only, does not reorder `tasks.md` |
-| `--json`                      | Output as JSON array                             |
+| `--json`                      | Output as compact JSON                           |
+| `--json-pretty`               | Output as indented JSON (for humans; implies `--json`) |
 
 **Behavior**
 
@@ -473,17 +475,10 @@ Only non-empty sections are shown. Sort order applies within each section.
 **`--json` output**:
 
 ```json
-[
-  {
-    "id": "6fs53liw",
-    "title": "Fix login bug",
-    "section": "today",
-    ...
-  }
-]
+{"schema_version":1,"data":[{"id":"6fs53liw","title":"Fix login bug","section":"today",...}]}
 ```
 
-Returns an empty array `[]` (exit 0) with `--json` when no tasks match. Without `--json`, exits with code `3`.
+`data` is always an array. Returns `{"schema_version":1,"data":[]}` (exit 0) with `--json` when no tasks match. Without `--json`, exits with code `3`.
 
 ---
 
@@ -499,8 +494,9 @@ mdone done [OPTIONS] TASK_ID [TASK_ID ...]
 
 | Flag        | Description                                            |
 |-------------|--------------------------------------------------------|
-| `--dry-run` | Preview what would be archived/spawned without writing |
-| `--json`    | Output results as JSON                                 |
+| `--dry-run`     | Preview what would be archived/spawned without writing |
+| `--json`        | Output results as compact JSON                         |
+| `--json-pretty` | Output as indented JSON (for humans; implies `--json`) |
 
 **Behavior**
 
@@ -517,28 +513,10 @@ mdone done abc12345 def67890 ghi11111
 **`--json` output** (always emitted with `--dry-run`):
 
 ```json
-[
-  {
-    "completed": {
-      "id": "abc12345",
-      "title": "Weekly report",
-      "section": "today",
-      "done": false,
-      ...
-    },
-    "spawned": {
-      "id": "xyz99887",
-      "title": "Weekly report",
-      "section": "today",
-      "due": "2026-04-25",
-      ...
-    },
-    "dry_run": false
-  }
-]
+{"schema_version":1,"data":[{"completed":{"id":"abc12345","title":"Weekly report","section":"today","done":false,...},"spawned":{"id":"xyz99887","title":"Weekly report","section":"today","due":"2026-04-25",...},"dry_run":false}]}
 ```
 
-`spawned` is `null` for non-recurring tasks.
+`data` is an array with one entry per task ID passed. `spawned` is `null` for non-recurring tasks.
 
 **Text output**:
 
@@ -562,17 +540,14 @@ mdone rm     [OPTIONS] TASK_ID
 
 | Flag        | Description                      |
 |-------------|----------------------------------|
-| `--dry-run` | Preview deletion without writing |
-| `--json`    | Output result as JSON            |
+| `--dry-run`     | Preview deletion without writing                       |
+| `--json`        | Output result as compact JSON                          |
+| `--json-pretty` | Output as indented JSON (for humans; implies `--json`) |
 
 **`--json` output**:
 
 ```json
-{
-  "deleted": "abc12345",
-  "task": { "id": "abc12345", "title": "...", "section": "today", ... },
-  "dry_run": false
-}
+{"schema_version":1,"data":{"deleted":"abc12345","task":{"id":"abc12345","title":"...","section":"today",...},"dry_run":false}}
 ```
 
 **Text output**: `Deleted: abc12345`
@@ -594,7 +569,8 @@ mdone edit [OPTIONS] TASK_ID [TASK_STRING]
 | `TASK_STRING`        | Replace the full task definition (preserves id, done, section)   |
 | `--set FIELD:VALUE`  | Set a specific field. Repeatable.                                |
 | `--dry-run`          | Preview the result without saving                                |
-| `--json`             | Output updated task as JSON                                      |
+| `--json`             | Output updated task as compact JSON                              |
+| `--json-pretty`      | Output as indented JSON (for humans; implies `--json`)           |
 
 **Settable fields** via `--set`:
 
@@ -627,7 +603,7 @@ mdone edit abc12345 --set notify:2h --set recur:weekly --dry-run
 mdone edit abc12345 --set priority:2 --json
 ```
 
-**`--json` output**: the full updated task dict (same shape as `add --json`, includes `section`).
+**`--json` output**: `{"schema_version":1,"data":<task-object>}` — same task shape as `add --json`, includes `section`.
 
 Exit code `2` if an unknown field or section value is passed to `--set`.
 
@@ -645,10 +621,11 @@ mdone snooze [OPTIONS] TASK_ID [DURATION]
 
 | Flag        | Description                                 |
 |-------------|---------------------------------------------|
-| `DURATION`  | `30m` / `2h` / `1d` / `YYYY-MM-DDTHH:MM`   |
-| `--clear`   | Remove the snooze from a task               |
-| `--dry-run` | Preview without saving                      |
-| `--json`    | Output updated task as JSON                 |
+| `DURATION`      | `30m` / `2h` / `1d` / `YYYY-MM-DDTHH:MM`              |
+| `--clear`       | Remove the snooze from a task                          |
+| `--dry-run`     | Preview without saving                                 |
+| `--json`        | Output updated task as compact JSON                    |
+| `--json-pretty` | Output as indented JSON (for humans; implies `--json`) |
 
 **Examples**:
 
@@ -663,7 +640,7 @@ mdone snooze abc12345 2h --dry-run
 
 Snoozed tasks are hidden from `list` and `recap` unless `--all` is passed. They are still reassigned by `organize` if they have a due date.
 
-**`--json` output**: updated task dict with `"snooze": "2026-04-15T10:30"` (or `null` after `--clear`).
+**`--json` output**: `{"schema_version":1,"data":<task-object>}` with `"snooze": "2026-04-15T10:30"` (or `null` after `--clear`).
 
 ---
 
@@ -679,26 +656,20 @@ mdone recap [OPTIONS]
 
 | Flag     | Description                                      |
 |----------|--------------------------------------------------|
-| `--week` | Show full 7-day lookahead instead of today only  |
-| `--json` | Output as JSON                                   |
+| `--week`        | Show full 7-day lookahead instead of today only        |
+| `--json`        | Output as compact JSON                                 |
+| `--json-pretty` | Output as indented JSON (for humans; implies `--json`) |
 
 **`--json` output** (daily recap):
 
 ```json
-{
-  "overdue": [ { "id": "...", "section": "today", ... } ],
-  "today":   [ { "id": "...", "section": "today", ... } ]
-}
+{"schema_version":1,"data":{"overdue":[{"id":"...","section":"today",...}],"today":[{"id":"...","section":"today",...}]}}
 ```
 
 **`--json` output** (weekly `--week`):
 
 ```json
-{
-  "overdue":     [ ... ],
-  "upcoming":    [ ... ],
-  "no_due_date": [ ... ]
-}
+{"schema_version":1,"data":{"overdue":[...],"upcoming":[...],"no_due_date":[...]}}
 ```
 
 Snoozed tasks are excluded from all recap views.
@@ -731,7 +702,8 @@ A task needs triage when it has **no due date AND no priority set** (priority ==
 
 | Flag     | Description                                                  |
 |----------|--------------------------------------------------------------|
-| `--json` | Non-interactive: print untriaged tasks as JSON and exit      |
+| `--json`        | Non-interactive: print untriaged tasks as compact JSON and exit |
+| `--json-pretty` | Output as indented JSON (for humans; implies `--json`)          |
 
 **Agent usage**: `mdone triage --json` returns an array of tasks that need triage. The agent can then call `mdone edit <id> --set due:<date>` or `mdone edit <id> --set priority:<n>` for each. After assigning due dates, run `mdone organize --sort` to move tasks to the right sections and sort within them.
 
@@ -749,16 +721,7 @@ mdone organize --sort priority
 **`--json` output**:
 
 ```json
-[
-  {
-    "id": "abc12345",
-    "title": "Unscheduled task",
-    "due": null,
-    "priority": 4,
-    "section": "inbox",
-    ...
-  }
-]
+{"schema_version":1,"data":[{"id":"abc12345","title":"Unscheduled task","due":null,"priority":4,"section":"inbox",...}]}
 ```
 
 **Interactive mode** (human): shows each task and offers prompts:
@@ -787,7 +750,8 @@ mdone organize [OPTIONS]
 |-------------------------------|-----------------------------------------------------------------------|
 | `--sort priority\|due\|title` | Sort tasks within each section after organizing                       |
 | `--dry-run`                   | Preview moves/sort without writing                                    |
-| `--json`                      | Output result as JSON                                                 |
+| `--json`                      | Output result as compact JSON                                         |
+| `--json-pretty`               | Output as indented JSON (for humans; implies `--json`)                |
 
 **Section assignment rules**:
 
@@ -829,21 +793,10 @@ mdone organize --sort priority --json
 **`--json` output**:
 
 ```json
-{
-  "moved": [
-    {
-      "id":    "abc12345",
-      "title": "Old task",
-      "from":  "inbox",
-      "to":    "today",
-      "due":   "2020-01-01"
-    }
-  ],
-  "sorted_by": "priority"
-}
+{"schema_version":1,"data":{"archived":[],"moved":[{"id":"abc12345","title":"Old task","from":"inbox","to":"today","due":"2020-01-01"}],"sorted_by":"priority"}}
 ```
 
-`moved` is an empty array when no tasks needed reassignment. `sorted_by` is `null` when `--sort` is not specified.
+`moved` is an empty array when no tasks needed reassignment. `sorted_by` is `null` when `--sort` is not specified. `archived` lists any tasks that were marked done directly in `tasks.md` and moved to `archive.md`.
 
 **Text output**:
 
@@ -884,33 +837,21 @@ mdone notify [OPTIONS]
 | `--backend BACKEND`    | Override backend for `--send` (`stdout`/`os`/`email`/`slack`/`webhook`) |
 | `--daemon`             | Run as a poll loop                                                    |
 | `--interval SECONDS`   | Override daemon poll interval                                         |
-| `--json`               | Output as JSON                                                        |
+| `--json`               | Output as compact JSON                                                |
+| `--json-pretty`        | Output as indented JSON (for humans; implies `--json`)                |
 
 **`--check --json` output** (core agent integration point):
 
 ```json
-[
-  {
-    "id":               "abc12345",
-    "title":            "Fix login bug",
-    "due":              "2026-04-15T09:00",
-    "notify":           "1h",
-    "priority":         1,
-    "tags":             ["work"],
-    "overdue":          false,
-    "minutes_until_due": 45
-  }
-]
+{"schema_version":1,"data":[{"id":"abc12345","title":"Fix login bug","due":"2026-04-15T09:00","notify":"1h","priority":1,"tags":["work"],"overdue":false,"minutes_until_due":45}]}
 ```
 
-Returns an empty array when no notifications are pending (exit 0).
+`data` is always an array. Returns `{"schema_version":1,"data":[]}` when no notifications are pending (exit 0).
 
 **`--mark-sent --json` output**:
 
 ```json
-{
-  "marked_sent": ["abc12345", "def67890"]
-}
+{"schema_version":1,"data":{"marked_sent":["abc12345","def67890"]}}
 ```
 
 See the [Agent Integration Guide](#14-agent-integration-guide) for the recommended notification workflow.
@@ -929,9 +870,10 @@ mdone config [OPTIONS]
 
 | Flag     | Description                                               |
 |----------|-----------------------------------------------------------|
-| `--init` | Write a default config.toml to TODO_DIR (no-op if exists) |
-| `--show` | Print the current merged configuration                    |
-| `--json` | Output current config as JSON (with `--show`)             |
+| `--init`        | Write a default config.toml to TODO_DIR (no-op if exists) |
+| `--show`        | Print the current merged configuration                    |
+| `--json`        | Output current config as compact JSON (with `--show`)     |
+| `--json-pretty` | Output as indented JSON (for humans; implies `--json`)    |
 
 ```bash
 # Create config with commented defaults
@@ -947,23 +889,7 @@ mdone config --show --json
 **`--show --json` output**:
 
 ```json
-{
-  "general": {
-    "date_format": "%Y-%m-%d",
-    "default_priority": 4
-  },
-  "tags": {
-    "default_tags": []
-  },
-  "notifications": {
-    "backend": "stdout",
-    "default_notify": "",
-    "poll_interval": 60,
-    "email": {},
-    "slack": {},
-    "webhook": {}
-  }
-}
+{"schema_version":1,"data":{"general":{"date_format":"%Y-%m-%d","default_priority":4},"tags":{"default_tags":[]},"notifications":{"backend":"stdout","default_notify":"","poll_interval":60,"email":{},"slack":{},"webhook":{}}}}
 ```
 
 ---
@@ -980,21 +906,16 @@ mdone search [OPTIONS] QUERY
 
 | Flag                  | Description                                      |
 |-----------------------|--------------------------------------------------|
-| `--archive`           | Also search completed tasks in archive.md        |
-| `--tag`, `-t TAG`     | Restrict results to tasks with this @tag         |
-| `--priority`, `-p N`  | Restrict results to tasks with this priority     |
-| `--json`              | Output results as JSON                           |
+| `--archive`           | Also search completed tasks in archive.md              |
+| `--tag`, `-t TAG`     | Restrict results to tasks with this @tag               |
+| `--priority`, `-p N`  | Restrict results to tasks with this priority           |
+| `--json`              | Output results as compact JSON                         |
+| `--json-pretty`       | Output as indented JSON (for humans; implies `--json`) |
 
 **`--json` output**:
 
 ```json
-[
-  {
-    "score": 6,
-    "matched_fields": ["title", "tags"],
-    "task": { "id": "...", "title": "...", "section": "today", ... }
-  }
-]
+{"schema_version":1,"data":[{"score":6,"matched_fields":["title","tags"],"task":{"id":"...","title":"...","section":"today",...}}]}
 ```
 
 Results are sorted by descending score, then alphabetically by title. Exit code `3` with no `--json` if no results.
@@ -1109,13 +1030,7 @@ mdone done abc12345 --json
 ```
 
 ```json
-[
-  {
-    "completed": { "id": "abc12345", "title": "Weekly report", "section": "today", "due": "2026-04-18", "recur": "weekly", ... },
-    "spawned":   { "id": "xyz99887", "title": "Weekly report", "section": "today", "due": "2026-04-25", "recur": "weekly", ... },
-    "dry_run": false
-  }
-]
+{"schema_version":1,"data":[{"completed":{"id":"abc12345","title":"Weekly report","section":"today","due":"2026-04-18","recur":"weekly",...},"spawned":{"id":"xyz99887","title":"Weekly report","section":"today","due":"2026-04-25","recur":"weekly",...},"dry_run":false}]}
 ```
 
 ---
@@ -1160,19 +1075,7 @@ mdone add -n "urgent: fix the login bug tomorrow" --dry-run
 ```
 
 ```json
-{
-  "id": "ab3xy901",
-  "title": "Fix the login bug",
-  "done": false,
-  "tags": ["work"],
-  "contexts": [],
-  "due": "2026-04-14",
-  "priority": 1,
-  "recur": null,
-  "notify": null,
-  "snooze": null,
-  "section": "today"
-}
+{"schema_version":1,"data":{"id":"ab3xy901","title":"Fix the login bug","done":false,"tags":["work"],"contexts":[],"due":"2026-04-14","priority":1,"recur":null,"notify":null,"snooze":null,"section":"today"}}
 ```
 
 ---
@@ -1450,7 +1353,9 @@ mdone config --init
 
 ### General principles
 
-- Always use `--json` for structured output
+- Always use `--json` for structured output; use `--json-pretty` only for debugging
+- Every JSON response is `{"schema_version": 1, "data": <payload>}` — always read `response["data"]`
+- Assert `schema_version == 1` at startup; any increment means a breaking data change
 - Use `--dry-run` before any destructive or mutating operation to verify parsed intent
 - Check exit codes: `0` = success, `1` = not found, `2` = bad input, `3` = no results
 - IDs are stable — store them when referencing tasks across calls
@@ -1518,11 +1423,11 @@ mdone organize --sort priority --dry-run
 
 # Apply: reassign sections + sort by priority
 mdone organize --sort priority --json
-# → {"moved": [{"id": "...", "from": "inbox", "to": "upcoming", ...}], "sorted_by": "priority"}
+# → {"schema_version":1,"data":{"archived":[],"moved":[{"id":"...","from":"inbox","to":"upcoming",...}],"sorted_by":"priority"}}
 
 # Just sort without changing sections
 mdone organize --sort due --json
-# → {"moved": [], "sorted_by": "due"}
+# → {"schema_version":1,"data":{"archived":[],"moved":[],"sorted_by":"due"}}
 ```
 
 ### Pattern: Complete a recurring task
@@ -1533,11 +1438,11 @@ mdone done abc12345 --dry-run
 
 # Complete it; spawned task inherits the parent's section
 mdone done abc12345 --json
-# → [{"completed": {...}, "spawned": {"id": "xyz99887", "section": "today", ...}, "dry_run": false}]
+# → {"schema_version":1,"data":[{"completed":{...},"spawned":{"id":"xyz99887","section":"today",...},"dry_run":false}]}
 
 # Re-organize spawned task based on its new due date, sort by priority
 mdone organize --sort priority --json
-# → {"moved": [...], "sorted_by": "priority"}
+# → {"schema_version":1,"data":{"archived":[],"moved":[...],"sorted_by":"priority"}}
 ```
 
 ### Pattern: Notification dispatch (recommended)
@@ -1566,7 +1471,9 @@ result = subprocess.run(
     ["mdone", "notify", "--check", "--json"],
     capture_output=True, text=True
 )
-pending = json.loads(result.stdout)
+response = json.loads(result.stdout)
+assert response["schema_version"] == 1  # guard against breaking changes
+pending = response["data"]
 
 ids_sent = []
 for task in pending:
@@ -1599,14 +1506,14 @@ mdone edit def67890 --set priority:2 --json
 
 # Auto-move newly scheduled tasks to the right section and sort by priority
 mdone organize --sort priority --json
-# → {"moved": [...], "sorted_by": "priority"}
+# → {"schema_version":1,"data":{"archived":[],"moved":[...],"sorted_by":"priority"}}
 ```
 
 ### Pattern: Section-based workflow management
 
 ```bash
 # See the full picture
-mdone list --json | jq 'group_by(.section)'
+mdone list --json | jq '.data | group_by(.section)'
 
 # Focus: what's on my plate right now?
 mdone list --section today --json
@@ -1653,25 +1560,24 @@ mdone snooze abc12345 --clear --json
 1. USER: "remind me to submit Q2 report by Friday, it's urgent"
 
 2. AGENT: mdone add -n "remind me to submit Q2 report by Friday, it's urgent" --dry-run
-   → { "title": "Submit Q2 report", "due": "2026-04-18", "priority": 1,
-       "tags": ["work"], "section": "upcoming" }
+   → {"schema_version":1,"data":{"title":"Submit Q2 report","due":"2026-04-18","priority":1,"tags":["work"],"section":"upcoming",...}}
 
 3. AGENT: (user confirms) mdone add -n "..." --json
-   → { "id": "rp9km3xz", "section": "upcoming", ... }
+   → {"schema_version":1,"data":{"id":"rp9km3xz","section":"upcoming",...}}
 
 4. CRON: 0 7 * * * mdone organize --sort priority --json   (Friday arrives)
-   → {"moved": [{ "id": "rp9km3xz", "from": "upcoming", "to": "today", "due": "2026-04-18" }], "sorted_by": "priority"}
+   → {"schema_version":1,"data":{"archived":[],"moved":[{"id":"rp9km3xz","from":"upcoming","to":"today","due":"2026-04-18"}],"sorted_by":"priority"}}
 
 5. CRON: mdone notify --check --json  (runs every N minutes)
-   → [{ "id": "rp9km3xz", "overdue": false, "minutes_until_due": 480, ... }]
+   → {"schema_version":1,"data":[{"id":"rp9km3xz","overdue":false,"minutes_until_due":480,...}]}
 
-6. AGENT: dispatch email/Slack/etc. with payload
+6. AGENT: dispatch email/Slack/etc. with response["data"][0]
    AGENT: mdone notify --mark-sent rp9km3xz
 
 7. USER: "mark Q2 report done"
 
 8. AGENT: mdone done rp9km3xz --json
-   → [{ "completed": {...}, "spawned": null, "dry_run": false }]
+   → {"schema_version":1,"data":[{"completed":{...},"spawned":null,"dry_run":false}]}
 ```
 
 ---

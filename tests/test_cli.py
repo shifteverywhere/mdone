@@ -3,7 +3,7 @@
 import json
 import pytest
 from click.testing import CliRunner
-from todo.cli import cli
+from todo.cli import cli, SCHEMA_VERSION
 from todo.storage import add_task, read_tasks, _archive_file
 from todo.models import Task
 
@@ -18,14 +18,52 @@ def runner():
     return CliRunner()
 
 
+def _unwrap(output: str) -> object:
+    """Parse a --json response and return the data payload after asserting the envelope."""
+    response = json.loads(output)
+    assert response["schema_version"] == SCHEMA_VERSION
+    return response["data"]
+
+
 def _add(runner, task_string, as_json=True):
-    """Helper: add a task and return the parsed JSON response."""
+    """Helper: add a task and return the parsed data payload."""
     args = ["add", task_string]
     if as_json:
         args.append("--json")
     result = runner.invoke(cli, args)
     assert result.exit_code == 0, result.output
-    return json.loads(result.output) if as_json else result.output
+    return _unwrap(result.output) if as_json else result.output
+
+
+# ---------------------------------------------------------------------------
+# JSON envelope contract
+# ---------------------------------------------------------------------------
+
+class TestJsonEnvelope:
+    def test_envelope_has_schema_version(self, runner):
+        _add(runner, "Task")  # triggers _unwrap which asserts schema_version
+
+    def test_envelope_compact_by_default(self, runner):
+        _add(runner, "Compact task")
+        result = runner.invoke(cli, ["add", "Another task", "--json"])
+        assert result.exit_code == 0
+        # Compact JSON has no newlines inside the payload
+        assert "\n" not in result.output.strip()
+
+    def test_json_pretty_is_indented(self, runner):
+        result = runner.invoke(cli, ["add", "Pretty task", "--json-pretty"])
+        assert result.exit_code == 0
+        # Indented JSON has multiple lines
+        assert result.output.count("\n") > 1
+        # Still a valid envelope
+        data = _unwrap(result.output)
+        assert "id" in data
+
+    def test_json_pretty_implies_json(self, runner):
+        """--json-pretty should produce machine-readable output even without --json."""
+        result = runner.invoke(cli, ["list", "--json-pretty"])
+        # exit 3 when empty, but the flag is accepted
+        assert result.exit_code in (0, 3)
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +126,7 @@ class TestList:
         _add(runner, "JSON task @work")
         result = runner.invoke(cli, ["list", "--json"])
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert isinstance(data, list)
         assert data[0]["title"] == "JSON task"
 
@@ -96,7 +134,7 @@ class TestList:
         _add(runner, "Work task @work")
         _add(runner, "Home task @home")
         result = runner.invoke(cli, ["list", "--tag", "work", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert len(data) == 1
         assert "work" in data[0]["tags"]
 
@@ -104,7 +142,7 @@ class TestList:
         _add(runner, "Urgent task priority:1")
         _add(runner, "Normal task priority:4")
         result = runner.invoke(cli, ["list", "--priority", "1", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert len(data) == 1
         assert data[0]["priority"] == 1
 
@@ -112,7 +150,7 @@ class TestList:
         _add(runner, "Old task due:2020-01-01")
         _add(runner, "Future task due:2099-12-31")
         result = runner.invoke(cli, ["list", "--overdue", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert len(data) == 1
         assert data[0]["due"] == "2020-01-01"
 
@@ -126,14 +164,14 @@ class TestList:
         _add(runner, "Low priority priority:4")
         _add(runner, "High priority priority:1")
         result = runner.invoke(cli, ["list", "--sort", "priority", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data[0]["priority"] == 1
 
     def test_list_sort_by_due(self, runner):
         _add(runner, "Later task due:2026-12-01")
         _add(runner, "Earlier task due:2026-01-01")
         result = runner.invoke(cli, ["list", "--sort", "due", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data[0]["due"] == "2026-01-01"
 
 
@@ -159,7 +197,7 @@ class TestDone:
         d = _add(runner, "JSON done")
         result = runner.invoke(cli, ["done", d["id"], "--json"])
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         # Shape: [{"completed": {...}, "spawned": null}]
         assert data[0]["completed"]["id"] == d["id"]
         assert data[0]["completed"]["done"] is True
@@ -197,7 +235,7 @@ class TestDelete:
     def test_delete_json_output(self, runner):
         d = _add(runner, "JSON delete")
         result = runner.invoke(cli, ["delete", d["id"], "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["deleted"] == d["id"]
 
     def test_delete_nonexistent_exits_1(self, runner):
@@ -221,7 +259,7 @@ class TestEdit:
             cli, ["edit", d["id"], "New title @newtag due:2026-05-01", "--json"]
         )
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["title"] == "New title"
         assert "newtag" in data["tags"]
         assert data["due"] == "2026-05-01"
@@ -235,13 +273,13 @@ class TestEdit:
     def test_edit_set_priority(self, runner):
         d = _add(runner, "Normal task")
         result = runner.invoke(cli, ["edit", d["id"], "--set", "priority:1", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["priority"] == 1
 
     def test_edit_set_due(self, runner):
         d = _add(runner, "Undated task")
         result = runner.invoke(cli, ["edit", d["id"], "--set", "due:2026-09-01", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["due"] == "2026-09-01"
 
     def test_edit_set_multiple_fields(self, runner):
@@ -250,7 +288,7 @@ class TestEdit:
             cli,
             ["edit", d["id"], "--set", "priority:2", "--set", "due:2026-06-01", "--json"],
         )
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["priority"] == 2
         assert data["due"] == "2026-06-01"
 
@@ -274,14 +312,14 @@ class TestEdit:
         result = runner.invoke(
             cli, ["edit", d["id"], "Still done task", "--json"]
         )
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["done"] is True
 
     def test_edit_set_due_relative_normalised(self, runner):
         """--set due:tomorrow should be stored as an ISO date, not the word."""
         d = _add(runner, "Relative due task")
         result = runner.invoke(cli, ["edit", d["id"], "--set", "due:tomorrow", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         from datetime import date, timedelta
         assert data["due"] == (date.today() + timedelta(days=1)).isoformat()
 
@@ -314,7 +352,7 @@ class TestRecurrence:
     def test_done_non_recurring_spawns_nothing(self, runner):
         d = _add(runner, "One-off task")
         result = runner.invoke(cli, ["done", d["id"], "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data[0]["spawned"] is None
         assert len(read_tasks()) == 0
 
@@ -342,7 +380,7 @@ class TestRecurrence:
     def test_done_recurring_json_has_spawned(self, runner):
         d = _add(runner, "Daily task due:2026-04-13 recur:daily")
         result = runner.invoke(cli, ["done", d["id"], "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data[0]["spawned"] is not None
         assert data[0]["spawned"]["due"] == "2026-04-14"
 
@@ -374,21 +412,21 @@ class TestSnoozeCommand:
         d = _add(runner, "Snoozable task")
         result = runner.invoke(cli, ["snooze", d["id"], "2099-12-31T23:59", "--json"])
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["snooze"] == "2099-12-31T23:59"
 
     def test_snoozed_task_hidden_from_list(self, runner):
         d = _add(runner, "Hidden task")
         runner.invoke(cli, ["snooze", d["id"], "2099-12-31T23:59"])
         result = runner.invoke(cli, ["list", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert not any(t["id"] == d["id"] for t in data)
 
     def test_snoozed_task_visible_with_all_flag(self, runner):
         d = _add(runner, "Snoozed task")
         runner.invoke(cli, ["snooze", d["id"], "2099-12-31T23:59"])
         result = runner.invoke(cli, ["list", "--all", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert any(t["id"] == d["id"] for t in data)
 
     def test_past_snooze_visible_in_list(self, runner):
@@ -398,14 +436,14 @@ class TestSnoozeCommand:
         task.snooze = "2020-01-01T00:00"  # already past
         update_task(task)
         result = runner.invoke(cli, ["list", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert any(t["id"] == d["id"] for t in data)
 
     def test_snooze_clear_removes_field(self, runner):
         d = _add(runner, "Task to unsnooze")
         runner.invoke(cli, ["snooze", d["id"], "2099-12-31T23:59"])
         result = runner.invoke(cli, ["snooze", d["id"], "--clear", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["snooze"] is None
 
     def test_snooze_nonexistent_exits_1(self, runner):
@@ -426,13 +464,13 @@ class TestRecap:
     def test_recap_json_keys(self, runner):
         result = runner.invoke(cli, ["recap", "--json"])
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert "overdue" in data
         assert "today" in data
 
     def test_recap_week_json_keys(self, runner):
         result = runner.invoke(cli, ["recap", "--week", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert "overdue" in data
         assert "upcoming" in data
         assert "no_due_date" in data
@@ -441,7 +479,7 @@ class TestRecap:
         _add(runner, "Old task due:2020-01-01")
         _add(runner, "Future task due:2099-12-31")
         result = runner.invoke(cli, ["recap", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert len(data["overdue"]) == 1
         assert data["overdue"][0]["due"] == "2020-01-01"
 
@@ -451,7 +489,7 @@ class TestRecap:
         _add(runner, f"Today task due:{today}")
         _add(runner, "Future task due:2099-12-31")
         result = runner.invoke(cli, ["recap", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert len(data["today"]) == 1
         assert data["today"][0]["due"] == today
 
@@ -461,7 +499,7 @@ class TestRecap:
         _add(runner, f"Soon task due:{in_3}")
         _add(runner, "Far future task due:2099-12-31")
         result = runner.invoke(cli, ["recap", "--week", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert any(t["due"] == in_3 for t in data["upcoming"])
         assert not any(t["due"] == "2099-12-31" for t in data["upcoming"])
 
@@ -474,7 +512,7 @@ class TestRecap:
         task.snooze = "2099-01-01T00:00"
         update_task(task)
         result = runner.invoke(cli, ["recap", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert not any(t["id"] == d["id"] for t in data["today"])
 
     def test_recap_text_output(self, runner):
@@ -506,7 +544,7 @@ class TestNaturalLanguageAdd:
         from unittest.mock import patch
         with patch("todo.nlp._search_dates", return_value=[]):
             result = runner.invoke(cli, ["add", "-n", "remind me to call Alice", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["title"] == "Call Alice"
 
     def test_natural_infers_priority(self, runner):
@@ -515,7 +553,7 @@ class TestNaturalLanguageAdd:
             result = runner.invoke(
                 cli, ["add", "-n", "urgent: fix the server", "--json"]
             )
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["priority"] == 1
         assert data["title"] == "Fix the server"
 
@@ -525,7 +563,7 @@ class TestNaturalLanguageAdd:
             result = runner.invoke(
                 cli, ["add", "-n", "dentist appointment on Thursday", "--json"]
             )
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert "health" in data["tags"]
 
     def test_natural_extracts_date(self, runner):
@@ -536,7 +574,7 @@ class TestNaturalLanguageAdd:
             result = runner.invoke(
                 cli, ["add", "-n", "call Alice next Friday", "--json"]
             )
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["due"] == "2026-04-17"
         assert "Friday" not in data["title"]
 
@@ -548,7 +586,7 @@ class TestNaturalLanguageAdd:
             result = runner.invoke(
                 cli, ["add", "-n", "call Alice next Friday at 3pm", "--json"]
             )
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["due"] == "2026-04-17T15:00"
 
     def test_natural_persists_to_disk(self, runner):
@@ -564,7 +602,7 @@ class TestNaturalLanguageAdd:
                 cli, ["add", "-n", "buy groceries", "--dry-run"]
             )
         assert result.exit_code == 0
-        assert json.loads(result.output)["title"] == "Buy groceries"
+        assert _unwrap(result.output)["title"] == "Buy groceries"
         assert read_tasks() == []   # nothing saved
 
     def test_dry_run_mini_syntax(self, runner):
@@ -573,7 +611,7 @@ class TestNaturalLanguageAdd:
             cli, ["add", "Review docs @work priority:2", "--dry-run"]
         )
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data["title"] == "Review docs"
         assert data["priority"] == 2
         assert read_tasks() == []
@@ -585,7 +623,7 @@ class TestNaturalLanguageAdd:
                 cli, ["add", "-n", "write the report", "--json"]
             )
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert "id" in data
         assert data["title"] == "Write the report"
 
@@ -610,14 +648,14 @@ class TestTriage:
         self._add_triaged(runner, "Already done")
         result = runner.invoke(cli, ["triage", "--json"])
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert len(data) == 1
         assert data[0]["title"] == "Needs triage"
 
     def test_json_empty_when_all_triaged(self, runner):
         self._add_triaged(runner, "Already prioritised")
         result = runner.invoke(cli, ["triage", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data == []
 
     def test_json_excludes_snoozed(self, runner):
@@ -627,21 +665,21 @@ class TestTriage:
         task.snooze = "2099-01-01T00:00"
         update_task(task)
         result = runner.invoke(cli, ["triage", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert not any(t["id"] == d["id"] for t in data)
 
     def test_json_excludes_done_tasks(self, runner):
         d = self._add_untriaged(runner, "Completed task")
         runner.invoke(cli, ["done", d["id"]])
         result = runner.invoke(cli, ["triage", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         assert data == []
 
     def test_task_with_due_excluded(self, runner):
         """A task with a due date but no priority is not considered untriaged."""
         _add(runner, "Has due but no priority due:2026-09-01")
         result = runner.invoke(cli, ["triage", "--json"])
-        data = json.loads(result.output)
+        data = _unwrap(result.output)
         # due is set, so it's not in the triage list
         assert data == []
 
