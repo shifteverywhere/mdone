@@ -94,6 +94,20 @@ def write_tasks(tasks: List[Task]) -> None:
 # Higher-level helpers
 # ---------------------------------------------------------------------------
 
+def read_archive_tasks() -> List[Task]:
+    """Read completed tasks from archive.md (flat, no section headers)."""
+    _ensure_dir()
+    arc = _archive_file()
+    if not arc.exists():
+        return []
+    tasks = []
+    for line in arc.read_text().splitlines():
+        task = parse_line(line)
+        if task:
+            tasks.append(task)
+    return tasks
+
+
 def find_task(task_id: str) -> Optional[Task]:
     for task in read_tasks():
         if task.id == task_id:
