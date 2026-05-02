@@ -6,6 +6,7 @@ Exit codes:
   1  task not found
   2  parse / input error
   3  no tasks matched the filter
+  4  duplicate found (--dedup without --force)
 """
 
 import json
@@ -25,9 +26,11 @@ from .storage import (
     delete_task,
     find_task,
     read_tasks,
+    read_archive_tasks,
     update_task,
     write_tasks,
 )
+from .dedup import find_by_idempotency_key, similar_tasks, DEDUP_THRESHOLD
 from .dates import (
     is_snoozed,
     parse_due_date,
@@ -182,8 +185,18 @@ def cli():
 @click.option("--json", "as_json", is_flag=True, help="Output as compact JSON")
 @click.option("--json-pretty", "json_pretty", is_flag=True,
               help="Output as indented JSON (for humans; implies --json)")
+@click.option("--dedup", is_flag=True,
+              help="Reject the add if a duplicate is detected (exit 4). "
+                   "Checks exact idempotency_key match first, then fuzzy title similarity.")
+@click.option("--idempotency-key", "idempotency_key", default=None, metavar="KEY",
+              help="Stable caller-provided key for exact deduplication")
+@click.option("--check-archive", is_flag=True,
+              help="Extend dedup search to completed tasks in archive.md")
+@click.option("--force", is_flag=True,
+              help="Add the task even if --dedup would reject it")
 def cmd_add(task_string: str, natural: bool, section: str, dry_run: bool,
-            as_json: bool, json_pretty: bool) -> None:
+            as_json: bool, json_pretty: bool,
+            dedup: bool, idempotency_key: str, check_archive: bool, force: bool) -> None:
     """Add a new task.
 
     Tasks are automatically placed in the most appropriate section:
@@ -205,6 +218,13 @@ def cmd_add(task_string: str, natural: bool, section: str, dry_run: bool,
     \b
       todo add -n "remind me to call Alice next Friday at 3pm"
       todo add -n "urgent: fix the login bug tomorrow"
+
+    Deduplication (--dedup):
+
+    \b
+      todo add "Fix login bug" --dedup --idempotency-key fix-login-2026
+      todo add "Fix login bug" --dedup           # fuzzy title check
+      todo add "Fix login bug" --dedup --force   # add regardless
     """
     as_json = as_json or json_pretty
     config = load_config()
@@ -236,19 +256,79 @@ def cmd_add(task_string: str, natural: bool, section: str, dry_run: bool,
         if dn:
             task.notify = dn
 
+    # --idempotency-key flag takes precedence over inline mini-syntax value
+    if idempotency_key:
+        task.idempotency_key = idempotency_key
+
     # Section: explicit flag > auto-assigned from due date
     task.section = section if section else _auto_section(task)
 
-    if dry_run:
-        _json_out(task.to_dict(), pretty=json_pretty)
-        return
+    # ------------------------------------------------------------------
+    # Deduplication check
+    # ------------------------------------------------------------------
+    if dedup:
+        pool = read_tasks()
+        if check_archive:
+            pool = pool + read_archive_tasks()
 
-    add_task(task)
+        duplicate: Task | None = None
+        similar: list = []
 
-    if as_json:
-        _json_out(task.to_dict(), pretty=json_pretty)
+        if task.idempotency_key:
+            # Key is the authoritative dedup signal — only do exact match, skip fuzzy.
+            duplicate = find_by_idempotency_key(task.idempotency_key, pool)
+        else:
+            # No key: fall back to fuzzy title similarity.
+            candidates = similar_tasks(task.title, pool, threshold=DEDUP_THRESHOLD)
+            if candidates:
+                duplicate = candidates[0][1]
+                similar = [{"score": round(s, 3), "task": t.to_dict()}
+                           for s, t in candidates]
+
+        if duplicate is not None and not force:
+            payload = {
+                "result": "duplicate",
+                "task": duplicate.to_dict(),
+                "similar": similar,
+            }
+            if as_json or dry_run:
+                _json_out(payload, pretty=json_pretty)
+            else:
+                click.echo(
+                    f"Duplicate: {duplicate.id}  {duplicate.title}", err=True
+                )
+            sys.exit(4)
+
+        # Populate similar for the force-created case so the caller has context.
+        if not similar and force and not task.idempotency_key:
+            candidates = similar_tasks(task.title, pool, threshold=DEDUP_THRESHOLD)
+            similar = [{"score": round(s, 3), "task": t.to_dict()}
+                       for s, t in candidates]
     else:
-        click.echo(f"Added [{task.section}]: {task.id}  {task.title}")
+        similar = []
+
+    # ------------------------------------------------------------------
+    # Dry-run / write
+    # ------------------------------------------------------------------
+    if dedup:
+        payload = {"result": "created", "task": task.to_dict(), "similar": similar}
+        if dry_run:
+            _json_out(payload, pretty=json_pretty)
+            return
+        add_task(task)
+        if as_json:
+            _json_out(payload, pretty=json_pretty)
+        else:
+            click.echo(f"Added [{task.section}]: {task.id}  {task.title}")
+    else:
+        if dry_run:
+            _json_out(task.to_dict(), pretty=json_pretty)
+            return
+        add_task(task)
+        if as_json:
+            _json_out(task.to_dict(), pretty=json_pretty)
+        else:
+            click.echo(f"Added [{task.section}]: {task.id}  {task.title}")
 
 
 # ---------------------------------------------------------------------------
@@ -491,6 +571,8 @@ def cmd_edit(task_id, task_string, set_fields, dry_run, as_json, json_pretty):
             task.notify = value
         elif key == "snooze":
             task.snooze = parse_snooze_duration(value)
+        elif key == "idempotency_key":
+            task.idempotency_key = value or None
         elif key == "title":
             task.title = value
         elif key == "section":
@@ -1009,10 +1091,12 @@ def cmd_config(init, show, as_json, json_pretty):
 @click.option("--tag", "-t", default=None, help="Restrict to tasks with this @tag")
 @click.option("--priority", "-p", type=int, default=None,
               help="Restrict to tasks with this priority")
+@click.option("--similar", "fuzzy", is_flag=True,
+              help="Fuzzy title-similarity search instead of keyword search")
 @click.option("--json", "as_json", is_flag=True, help="Output as compact JSON")
 @click.option("--json-pretty", "json_pretty", is_flag=True,
               help="Output as indented JSON (for humans; implies --json)")
-def cmd_search(query, include_archive, tag, priority, as_json, json_pretty):
+def cmd_search(query, include_archive, tag, priority, fuzzy, as_json, json_pretty):
     """Full-text search across tasks.
 
     \b
@@ -1021,27 +1105,47 @@ def cmd_search(query, include_archive, tag, priority, as_json, json_pretty):
       todo search "report" --priority 1
       todo search "old task" --archive
       todo search "meeting" --json
-    """
-    from .storage import _archive_file, _ensure_dir
-    from .parser import parse_line as _parse_line
 
+    Fuzzy similarity mode (--similar):
+
+    \b
+      todo search "fix login" --similar           # ranked by title token overlap
+      todo search "invoice" --similar --archive   # include completed tasks
+    """
     as_json = as_json or json_pretty
     tasks = read_tasks()
 
     if include_archive:
-        _ensure_dir()
-        arc = _archive_file()
-        if arc.exists():
-            for line in arc.read_text().splitlines():
-                t = _parse_line(line)
-                if t:
-                    tasks.append(t)
+        tasks = tasks + read_archive_tasks()
 
     # Pre-filter by tag / priority before scoring
     if tag:
         tasks = [t for t in tasks if tag in t.tags]
     if priority is not None:
         tasks = [t for t in tasks if t.priority == priority]
+
+    if fuzzy:
+        # Jaccard similarity — any non-zero score is included
+        candidates = similar_tasks(query, tasks, threshold=0.0)
+        # Filter to tasks that share at least one token with the query
+        candidates = [(s, t) for s, t in candidates if s > 0.0]
+
+        if as_json:
+            _json_out(
+                [{"score": round(s, 3), "task": t.to_dict()} for s, t in candidates],
+                pretty=json_pretty,
+            )
+            return
+
+        if not candidates:
+            click.echo(f"No similar tasks found for '{query}'.")
+            sys.exit(3)
+
+        config = load_config()
+        date_fmt = get_date_format(config)
+        for score, t in candidates:
+            click.echo(f"[similarity:{score:.2f}]  {_task_row(t, date_fmt)}")
+        return
 
     results = search_tasks(query, tasks)
 

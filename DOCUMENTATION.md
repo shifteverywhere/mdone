@@ -257,18 +257,19 @@ The full task mini-syntax (section is **not** part of the line — it is derived
 - [<status>] <title> [<fields>...] id:<id>
 ```
 
-| Component       | Format                                   | Notes                                         |
-|-----------------|------------------------------------------|-----------------------------------------------|
-| `<status>`      | ` ` (space) or `x`                       | Space = open, `x` = done                      |
-| `<title>`       | Free text                                | Required. May contain spaces.                 |
-| `@<tag>`        | `@word`                                  | Multiple allowed. `(?:^|\s)@(\w+)` pattern.   |
-| `+<context>`    | `+word`                                  | Multiple allowed. `(?:^|\s)\+(\w+)` pattern.  |
-| `due:<date>`    | ISO 8601 date or datetime                | `due:2026-04-15` or `due:2026-04-15T09:00`    |
-| `priority:<n>`  | Integer 1–4                              | 1=urgent, 2=high, 3=medium, 4=none (default)  |
-| `recur:<rule>`  | `daily` / `weekly` / `monthly`           | Spawns next occurrence when task is completed |
-| `notify:<lead>` | `30m` / `2h` / `1d`                      | Lead time before due for notifications        |
-| `snooze:<dt>`   | `YYYY-MM-DDTHH:MM`                       | Hidden from list until this time              |
-| `id:<id>`       | 8-char alphanumeric                      | Auto-generated; always present after `add`    |
+| Component                  | Format                                   | Notes                                         |
+|----------------------------|------------------------------------------|-----------------------------------------------|
+| `<status>`                 | ` ` (space) or `x`                       | Space = open, `x` = done                      |
+| `<title>`                  | Free text                                | Required. May contain spaces.                 |
+| `@<tag>`                   | `@word`                                  | Multiple allowed. `(?:^|\s)@(\w+)` pattern.   |
+| `+<context>`               | `+word`                                  | Multiple allowed. `(?:^|\s)\+(\w+)` pattern.  |
+| `due:<date>`               | ISO 8601 date or datetime                | `due:2026-04-15` or `due:2026-04-15T09:00`    |
+| `priority:<n>`             | Integer 1–4                              | 1=urgent, 2=high, 3=medium, 4=none (default)  |
+| `recur:<rule>`             | `daily` / `weekly` / `monthly`           | Spawns next occurrence when task is completed |
+| `notify:<lead>`            | `30m` / `2h` / `1d`                      | Lead time before due for notifications        |
+| `snooze:<dt>`              | `YYYY-MM-DDTHH:MM`                       | Hidden from list until this time              |
+| `idempotency_key:<key>`    | Any non-whitespace string                | Stable caller key for exact deduplication     |
+| `id:<id>`                  | 8-char alphanumeric                      | Auto-generated; always present after `add`    |
 
 **Example — full mini-syntax**:
 
@@ -311,10 +312,11 @@ Every `--json` response is wrapped in a versioned envelope:
   "contexts": [],
   "due":      "2026-04-18",
   "priority": 2,
-  "recur":    "weekly",
-  "notify":   "2h",
-  "snooze":   null,
-  "section":  "upcoming"
+  "recur":            "weekly",
+  "notify":           "2h",
+  "snooze":           null,
+  "section":          "upcoming",
+  "idempotency_key":  null
 }
 ```
 
@@ -324,12 +326,13 @@ All fields are always present. `null` indicates unset optional fields.
 
 ## 6. Exit Codes
 
-| Code | Meaning                                     |
-|------|---------------------------------------------|
-| `0`  | Success                                     |
-| `1`  | Task not found                              |
-| `2`  | Parse / input error (invalid field, format) |
-| `3`  | No tasks matched the filter or query        |
+| Code | Meaning                                                    |
+|------|------------------------------------------------------------|
+| `0`  | Success                                                    |
+| `1`  | Task not found                                             |
+| `2`  | Parse / input error (invalid field, format)                |
+| `3`  | No tasks matched the filter or query                       |
+| `4`  | Duplicate found (`--dedup` without `--force`)              |
 
 ---
 

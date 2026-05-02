@@ -15,6 +15,7 @@ class Task:
     notify: Optional[str] = None    # lead time before due: 30m | 1h | 1d
     snooze: Optional[str] = None    # YYYY-MM-DDTHH:MM
     section: str = "inbox"          # inbox | today | upcoming | someday | waiting
+    idempotency_key: Optional[str] = None  # caller-provided stable key for dedup
 
     def to_dict(self) -> dict:
         return {
@@ -29,4 +30,5 @@ class Task:
             "notify": self.notify,
             "snooze": self.snooze,
             "section": self.section,
+            "idempotency_key": self.idempotency_key,
         }
