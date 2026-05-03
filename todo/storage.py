@@ -14,6 +14,7 @@ from typing import List, Optional
 
 from .models import Task
 from .parser import parse_line, serialize_task
+from .metadata import read_all_meta, update_task_meta, delete_task_meta
 
 # Ordered list of all valid section names (lowercase).
 SECTIONS = ["inbox", "today", "upcoming", "someday", "waiting"]
@@ -52,6 +53,15 @@ def _ensure_dir() -> None:
 # Core read / write
 # ---------------------------------------------------------------------------
 
+def _apply_meta(tasks: List[Task]) -> List[Task]:
+    """Populate task.idempotency_key from metadata.json for each task in place."""
+    all_meta = read_all_meta()
+    for task in tasks:
+        meta = all_meta.get(task.id, {})
+        task.idempotency_key = meta.get("idempotency_key")
+    return tasks
+
+
 def read_tasks() -> List[Task]:
     """Read tasks from tasks.md, assigning each task its section from the
     nearest preceding ## header."""
@@ -69,7 +79,7 @@ def read_tasks() -> List[Task]:
         if task:
             task.section = current_section
             tasks.append(task)
-    return tasks
+    return _apply_meta(tasks)
 
 
 def write_tasks(tasks: List[Task]) -> None:
@@ -105,7 +115,7 @@ def read_archive_tasks() -> List[Task]:
         task = parse_line(line)
         if task:
             tasks.append(task)
-    return tasks
+    return _apply_meta(tasks)
 
 
 def find_task(task_id: str) -> Optional[Task]:
@@ -123,22 +133,30 @@ def add_task(task: Task) -> None:
 
 def update_task(task: Task) -> bool:
     """Replace the task with the matching id. Returns False if not found."""
+    from datetime import datetime, timezone
     tasks = read_tasks()
     for i, t in enumerate(tasks):
         if t.id == task.id:
             tasks[i] = task
             write_tasks(tasks)
+            update_task_meta(task.id, {"edited_at": datetime.now(timezone.utc).isoformat()})
             return True
     return False
 
 
-def delete_task(task_id: str) -> bool:
-    """Remove a task by id. Returns False if not found."""
+def delete_task(task_id: str, keep_meta: bool = False) -> bool:
+    """Remove a task by id. Returns False if not found.
+
+    Pass keep_meta=True when the task is being archived (done flow) so the
+    sidecar metadata is preserved for --check-archive dedup lookups.
+    """
     tasks = read_tasks()
     filtered = [t for t in tasks if t.id != task_id]
     if len(filtered) == len(tasks):
         return False
     write_tasks(filtered)
+    if not keep_meta:
+        delete_task_meta(task_id)
     return True
 
 

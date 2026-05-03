@@ -31,6 +31,7 @@ from .storage import (
     write_tasks,
 )
 from .dedup import find_by_idempotency_key, similar_tasks, DEDUP_THRESHOLD
+from .metadata import get_task_meta, read_all_meta, create_task_meta
 from .dates import (
     is_snoozed,
     parse_due_date,
@@ -75,6 +76,28 @@ def _json_out(payload, pretty: bool = False) -> None:
 def _emit(obj, as_json: bool, pretty: bool = False) -> None:
     if as_json:
         _json_out(obj, pretty=pretty)
+
+
+def _merge_meta(task_dict: dict, meta: dict) -> dict:
+    """Merge sidecar metadata fields into a task dict for JSON output."""
+    task_dict["idempotency_key"] = meta.get("idempotency_key")
+    task_dict["source"] = meta.get("source", "manual")
+    task_dict["origin_id"] = meta.get("origin_id")
+    task_dict["origin_url"] = meta.get("origin_url")
+    task_dict["captured_at"] = meta.get("captured_at")
+    task_dict["edited_at"] = meta.get("edited_at")
+    return task_dict
+
+
+def _task_with_meta(task: Task) -> dict:
+    """Return task.to_dict() with sidecar metadata merged in (single task)."""
+    return _merge_meta(task.to_dict(), get_task_meta(task.id))
+
+
+def _tasks_with_meta(tasks: list) -> list:
+    """Return list of task dicts with sidecar metadata merged in (batched read)."""
+    all_meta = read_all_meta()
+    return [_merge_meta(t.to_dict(), all_meta.get(t.id, {})) for t in tasks]
 
 
 def _parse_task_string(task_string: str) -> Task:
@@ -194,9 +217,19 @@ def cli():
               help="Extend dedup search to completed tasks in archive.md")
 @click.option("--force", is_flag=True,
               help="Add the task even if --dedup would reject it")
+@click.option("--source", default=None, metavar="SOURCE",
+              help="Where the task originated (e.g. slack, email, github, meeting, api, manual). "
+                   "Defaults to 'manual'. Immutable after creation.")
+@click.option("--origin-id", "origin_id", default=None, metavar="ID",
+              help="Stable identifier in the source system (e.g. Slack message ID). Immutable.")
+@click.option("--origin-url", "origin_url", default=None, metavar="URL",
+              help="Link back to the originating message or record. Immutable.")
+@click.option("--captured-at", "captured_at", default=None, metavar="ISO8601",
+              help="When the original event occurred (ISO 8601). Immutable.")
 def cmd_add(task_string: str, natural: bool, section: str, dry_run: bool,
             as_json: bool, json_pretty: bool,
-            dedup: bool, idempotency_key: str, check_archive: bool, force: bool) -> None:
+            dedup: bool, idempotency_key: str, check_archive: bool, force: bool,
+            source: str, origin_id: str, origin_url: str, captured_at: str) -> None:
     """Add a new task.
 
     Tasks are automatically placed in the most appropriate section:
@@ -225,6 +258,12 @@ def cmd_add(task_string: str, natural: bool, section: str, dry_run: bool,
       todo add "Fix login bug" --dedup --idempotency-key fix-login-2026
       todo add "Fix login bug" --dedup           # fuzzy title check
       todo add "Fix login bug" --dedup --force   # add regardless
+
+    Provenance (agent use):
+
+    \b
+      todo add "Follow up with Alice" --source slack --origin-id C123-msg456 \\
+           --origin-url https://... --captured-at 2026-05-03T10:00:00Z
     """
     as_json = as_json or json_pretty
     config = load_config()
@@ -256,9 +295,8 @@ def cmd_add(task_string: str, natural: bool, section: str, dry_run: bool,
         if dn:
             task.notify = dn
 
-    # --idempotency-key flag takes precedence over inline mini-syntax value
-    if idempotency_key:
-        task.idempotency_key = idempotency_key
+    # idempotency_key is flag-only; store on task in memory for dedup logic
+    task.idempotency_key = idempotency_key or None
 
     # Section: explicit flag > auto-assigned from due date
     task.section = section if section else _auto_section(task)
@@ -282,13 +320,13 @@ def cmd_add(task_string: str, natural: bool, section: str, dry_run: bool,
             candidates = similar_tasks(task.title, pool, threshold=DEDUP_THRESHOLD)
             if candidates:
                 duplicate = candidates[0][1]
-                similar = [{"score": round(s, 3), "task": t.to_dict()}
+                similar = [{"score": round(s, 3), "task": _task_with_meta(t)}
                            for s, t in candidates]
 
         if duplicate is not None and not force:
             payload = {
                 "result": "duplicate",
-                "task": duplicate.to_dict(),
+                "task": _task_with_meta(duplicate),
                 "similar": similar,
             }
             if as_json or dry_run:
@@ -302,7 +340,7 @@ def cmd_add(task_string: str, natural: bool, section: str, dry_run: bool,
         # Populate similar for the force-created case so the caller has context.
         if not similar and force and not task.idempotency_key:
             candidates = similar_tasks(task.title, pool, threshold=DEDUP_THRESHOLD)
-            similar = [{"score": round(s, 3), "task": t.to_dict()}
+            similar = [{"score": round(s, 3), "task": _task_with_meta(t)}
                        for s, t in candidates]
     else:
         similar = []
@@ -310,23 +348,33 @@ def cmd_add(task_string: str, natural: bool, section: str, dry_run: bool,
     # ------------------------------------------------------------------
     # Dry-run / write
     # ------------------------------------------------------------------
+    meta = {
+        "source": source or "manual",
+        "origin_id": origin_id,
+        "origin_url": origin_url,
+        "captured_at": captured_at,
+        "idempotency_key": idempotency_key or None,
+    }
+
     if dedup:
-        payload = {"result": "created", "task": task.to_dict(), "similar": similar}
+        payload = {"result": "created", "task": _merge_meta(task.to_dict(), meta), "similar": similar}
         if dry_run:
             _json_out(payload, pretty=json_pretty)
             return
         add_task(task)
+        create_task_meta(task.id, meta)
         if as_json:
             _json_out(payload, pretty=json_pretty)
         else:
             click.echo(f"Added [{task.section}]: {task.id}  {task.title}")
     else:
         if dry_run:
-            _json_out(task.to_dict(), pretty=json_pretty)
+            _json_out(_merge_meta(task.to_dict(), meta), pretty=json_pretty)
             return
         add_task(task)
+        create_task_meta(task.id, meta)
         if as_json:
-            _json_out(task.to_dict(), pretty=json_pretty)
+            _json_out(_task_with_meta(task), pretty=json_pretty)
         else:
             click.echo(f"Added [{task.section}]: {task.id}  {task.title}")
 
@@ -409,7 +457,7 @@ def cmd_list(tag, priority, due, overdue, show_done, show_all, section, sort,
     tasks.sort(key=_sort_key)
 
     if as_json:
-        _json_out([t.to_dict() for t in tasks], pretty=json_pretty)
+        _json_out(_tasks_with_meta(tasks), pretty=json_pretty)
         return
 
     if not tasks:
@@ -470,14 +518,14 @@ def cmd_done(task_ids, dry_run, as_json, json_pretty):
         next_task = spawn_next_occurrence(task)
 
         if not dry_run:
-            archive_task(task)    # marks done=True, appends to archive.md
-            delete_task(task_id)  # removes from tasks.md
+            archive_task(task)                  # marks done=True, appends to archive.md
+            delete_task(task_id, keep_meta=True)  # removes from tasks.md; keeps metadata
             if next_task:
                 add_task(next_task)
 
         results.append({
-            "completed": task.to_dict(),
-            "spawned": next_task.to_dict() if next_task else None,
+            "completed": _task_with_meta(task),
+            "spawned": _task_with_meta(next_task) if next_task else None,
             "dry_run": dry_run,
         })
 
@@ -512,7 +560,7 @@ def cmd_delete(task_id, dry_run, as_json, json_pretty):
     if not dry_run:
         delete_task(task_id)
 
-    result = {"deleted": task_id, "task": task.to_dict(), "dry_run": dry_run}
+    result = {"deleted": task_id, "task": _task_with_meta(task), "dry_run": dry_run}
     if as_json or dry_run:
         _json_out(result, pretty=json_pretty)
     else:
@@ -571,8 +619,6 @@ def cmd_edit(task_id, task_string, set_fields, dry_run, as_json, json_pretty):
             task.notify = value
         elif key == "snooze":
             task.snooze = parse_snooze_duration(value)
-        elif key == "idempotency_key":
-            task.idempotency_key = value or None
         elif key == "title":
             task.title = value
         elif key == "section":
@@ -589,7 +635,7 @@ def cmd_edit(task_id, task_string, set_fields, dry_run, as_json, json_pretty):
         update_task(task)
 
     if as_json or dry_run:
-        _json_out(task.to_dict(), pretty=json_pretty)
+        _json_out(_task_with_meta(task), pretty=json_pretty)
     else:
         click.echo(f"Updated: {task.id}  {task.title}")
 
@@ -627,7 +673,7 @@ def cmd_snooze(task_id, duration, clear, dry_run, as_json, json_pretty):
         if not dry_run:
             update_task(task)
         if as_json or dry_run:
-            _json_out(task.to_dict(), pretty=json_pretty)
+            _json_out(_task_with_meta(task), pretty=json_pretty)
         else:
             click.echo(f"Snooze cleared: {task.id}  {task.title}")
         return
@@ -646,7 +692,7 @@ def cmd_snooze(task_id, duration, clear, dry_run, as_json, json_pretty):
         update_task(task)
 
     if as_json or dry_run:
-        _json_out(task.to_dict(), pretty=json_pretty)
+        _json_out(_task_with_meta(task), pretty=json_pretty)
     else:
         click.echo(f"Snoozed: {task.id}  {task.title}  until {task.snooze}")
 
@@ -688,9 +734,9 @@ def cmd_recap(week, as_json, json_pretty):
 
         if as_json:
             _json_out({
-                "overdue": [t.to_dict() for t in overdue],
-                "upcoming": [t.to_dict() for t in upcoming],
-                "no_due_date": [t.to_dict() for t in no_due],
+                "overdue": _tasks_with_meta(overdue),
+                "upcoming": _tasks_with_meta(upcoming),
+                "no_due_date": _tasks_with_meta(no_due),
             }, pretty=json_pretty)
         else:
             _section("OVERDUE", overdue)
@@ -704,8 +750,8 @@ def cmd_recap(week, as_json, json_pretty):
 
         if as_json:
             _json_out({
-                "overdue": [t.to_dict() for t in overdue],
-                "today": [t.to_dict() for t in today_tasks],
+                "overdue": _tasks_with_meta(overdue),
+                "today": _tasks_with_meta(today_tasks),
             }, pretty=json_pretty)
         else:
             _section("OVERDUE", overdue)
@@ -737,7 +783,7 @@ def cmd_triage(as_json, json_pretty):
     ]
 
     if as_json:
-        _json_out([t.to_dict() for t in candidates], pretty=json_pretty)
+        _json_out(_tasks_with_meta(candidates), pretty=json_pretty)
         return
 
     if not candidates:
@@ -1132,7 +1178,7 @@ def cmd_search(query, include_archive, tag, priority, fuzzy, as_json, json_prett
 
         if as_json:
             _json_out(
-                [{"score": round(s, 3), "task": t.to_dict()} for s, t in candidates],
+                [{"score": round(s, 3), "task": _task_with_meta(t)} for s, t in candidates],
                 pretty=json_pretty,
             )
             return
@@ -1153,7 +1199,7 @@ def cmd_search(query, include_archive, tag, priority, fuzzy, as_json, json_prett
         _json_out(
             [{"score": r.score,
               "matched_fields": r.matched_fields,
-              "task": r.task.to_dict()} for r in results],
+              "task": _task_with_meta(r.task)} for r in results],
             pretty=json_pretty,
         )
         return
