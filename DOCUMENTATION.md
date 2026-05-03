@@ -440,13 +440,50 @@ If `config.toml` defines defaults, they are applied when not already set by the 
 - `general.default_priority` — used if task has no explicit priority
 - `notifications.default_notify` — used if task has no `notify:` field
 
-**`--dry-run` output** (always JSON regardless of `--json` flag):
+**`--dry-run` output** — structured diff showing exactly what mdone understood, without saving:
 
 ```json
-{"schema_version":1,"data":{"id":"ab3xy901","title":"Buy milk","done":false,"tags":["shopping"],"contexts":[],"due":"2026-04-15","priority":2,"recur":null,"notify":null,"snooze":null,"section":"today"}}
+{
+  "schema_version": 1,
+  "data": {
+    "dry_run": true,
+    "action": "add",
+    "before": null,
+    "after": {
+      "id": "ab3xy901", "title": "Follow up with Alice", "done": false,
+      "tags": ["work"], "contexts": [], "due": "2026-05-09",
+      "priority": 2, "recur": null, "notify": "1d", "snooze": null,
+      "section": "upcoming", "source": "manual",
+      "origin_id": null, "origin_url": null, "captured_at": null, "edited_at": null,
+      "idempotency_key": null
+    },
+    "changes": [
+      {"field": "title",   "before": null, "after": "Follow up with Alice"},
+      {"field": "section", "before": null, "after": "upcoming", "reason": "future due date"},
+      {"field": "due",     "before": null, "after": "2026-05-09", "inferred_from": "next Friday"},
+      {"field": "priority","before": null, "after": 2}
+    ],
+    "warnings": [],
+    "ambiguities": []
+  }
+}
 ```
 
-**`--json` output**: same `data` shape, written to stdout after the task is saved. **`--json-pretty`** adds indentation to either.
+**`changes` entries**: only non-trivial fields are listed (`title` and `section` always appear; others only when set).
+
+| Key             | When present                                                  |
+|-----------------|---------------------------------------------------------------|
+| `inferred_from` | The raw input string that was parsed/normalised to produce `after` |
+| `reason`        | The rule or logic that determined the value (section auto-assignment) |
+
+**`warnings`**: plain strings for detectable problems:
+- `"due date '2026-01-01' is in the past"` — due date normalised to a past date
+- `"'deadline:tomorrow' looks like a field but was not recognised — treated as title text"` — unrecognised `key:value` token in mini-syntax
+
+**`ambiguities`**: plain strings for cases where interpretation was uncertain (NLP mode only):
+- `"2 date expressions found in input; used 'next Friday'"` — multiple dates detected; first was used
+
+**`--json` output**: regular task dict written to stdout after saving. **`--json-pretty`** adds indentation to either.
 
 **Text output**:
 
@@ -647,6 +684,28 @@ mdone edit abc12345 --set notify:2h --set recur:weekly --dry-run
 # Agent: get JSON back
 mdone edit abc12345 --set priority:2 --json
 ```
+
+**`--dry-run` output** — before/after diff showing only changed fields:
+
+```json
+{
+  "schema_version": 1,
+  "data": {
+    "dry_run": true,
+    "action": "edit",
+    "before": {"id": "abc12345", "title": "Old title", "priority": 4, ...},
+    "after":  {"id": "abc12345", "title": "Old title", "priority": 1, ...},
+    "changes": [
+      {"field": "priority", "before": 4, "after": 1},
+      {"field": "due", "before": null, "after": "2026-05-09", "inferred_from": "next-friday"}
+    ],
+    "warnings": [],
+    "ambiguities": []
+  }
+}
+```
+
+`changes` lists only the fields whose value actually changed. `inferred_from` is included when a raw value was normalised (e.g. a relative date string). `warnings` fires when the resulting due date is in the past.
 
 **`--json` output**: `{"schema_version":1,"data":<task-object>}` — same task shape as `add --json`, includes `section`.
 
@@ -1498,15 +1557,37 @@ mdone add "Fix null pointer in auth service" \
 
 ### Pattern: Add a task safely
 
-```bash
-# Step 1: dry-run to confirm parse and section assignment
-mdone add "Fix authentication bug @work due:tomorrow priority:1 notify:2h" --dry-run
-# → { "section": "today", ... }
+`--dry-run` returns a structured diff — the agent can read `changes` to understand exactly what mdone parsed before committing:
 
+```bash
+# Step 1: dry-run to confirm parse, section, and any inferences
+mdone add "Fix authentication bug @work due:tomorrow priority:1 notify:2h" --dry-run
+```
+
+```json
+{
+  "data": {
+    "action": "add", "before": null,
+    "after": {"title": "Fix authentication bug", "section": "today", "due": "2026-05-04", ...},
+    "changes": [
+      {"field": "title",   "before": null, "after": "Fix authentication bug"},
+      {"field": "section", "before": null, "after": "today",  "reason": "due date is today or in the past"},
+      {"field": "due",     "before": null, "after": "2026-05-04", "inferred_from": "tomorrow"},
+      {"field": "priority","before": null, "after": 1},
+      {"field": "notify",  "before": null, "after": "2h"}
+    ],
+    "warnings": [], "ambiguities": []
+  }
+}
+```
+
+```bash
 # Step 2: add for real and capture the ID
 mdone add "Fix authentication bug @work due:tomorrow priority:1 notify:2h" --json
 # → { "id": "abc12345", "section": "today", ... }
 ```
+
+Check `warnings` before saving — a `"due date is in the past"` warning means the date resolved unexpectedly. Check `ambiguities` in NLP mode when multiple date expressions were found.
 
 Override section when auto-assignment doesn't match intent:
 
