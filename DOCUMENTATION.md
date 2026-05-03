@@ -192,6 +192,7 @@ All files live inside `TODO_DIR` (default `~/.todo/`).
 ~/.todo/
 ├── tasks.md       # Active tasks, grouped under section headers
 ├── archive.md     # Completed tasks (append-only, flat)
+├── metadata.json  # Sidecar: agent-facing provenance metadata, keyed by task ID
 ├── .notified      # Notification deduplication state (tab-separated)
 └── config.toml    # Optional configuration (human-editable TOML)
 ```
@@ -232,6 +233,31 @@ Tasks are written one per line under `## Section` headers. All five section head
 
 Same per-line format as `tasks.md`, but flat (no section headers). Tasks are appended (never removed) when completed via `done`.
 
+### metadata.json
+
+JSON file keyed by task ID. Stores agent-facing provenance fields that have no human value and would clutter `tasks.md`. All provenance fields are immutable once set; `edited_at` is updated automatically on each `edit`.
+
+```json
+{
+  "schema_version": 1,
+  "tasks": {
+    "abc12345": {
+      "source": "slack",
+      "origin_id": "C123456-msg-789",
+      "origin_url": "https://example.com/msg/789",
+      "captured_at": "2026-05-03T10:00:00Z",
+      "idempotency_key": "fix-login-2026",
+      "edited_at": "2026-05-03T11:42:00Z"
+    }
+  }
+}
+```
+
+- **Immutable fields** (`source`, `origin_id`, `origin_url`, `captured_at`, `idempotency_key`): set on `add`, never overwritten by `edit`
+- **`edited_at`**: updated automatically on every `edit`
+- Entries persist through `done` (archiving) so `--check-archive` dedup lookups still work
+- Entries are removed only on permanent `delete`
+
 ### .notified
 
 Tab-separated file, one record per line: `task_id<TAB>YYYY-MM-DDTHH:MM`
@@ -257,19 +283,20 @@ The full task mini-syntax (section is **not** part of the line — it is derived
 - [<status>] <title> [<fields>...] id:<id>
 ```
 
-| Component                  | Format                                   | Notes                                         |
-|----------------------------|------------------------------------------|-----------------------------------------------|
-| `<status>`                 | ` ` (space) or `x`                       | Space = open, `x` = done                      |
-| `<title>`                  | Free text                                | Required. May contain spaces.                 |
-| `@<tag>`                   | `@word`                                  | Multiple allowed. `(?:^|\s)@(\w+)` pattern.   |
-| `+<context>`               | `+word`                                  | Multiple allowed. `(?:^|\s)\+(\w+)` pattern.  |
-| `due:<date>`               | ISO 8601 date or datetime                | `due:2026-04-15` or `due:2026-04-15T09:00`    |
-| `priority:<n>`             | Integer 1–4                              | 1=urgent, 2=high, 3=medium, 4=none (default)  |
-| `recur:<rule>`             | `daily` / `weekly` / `monthly`           | Spawns next occurrence when task is completed |
-| `notify:<lead>`            | `30m` / `2h` / `1d`                      | Lead time before due for notifications        |
-| `snooze:<dt>`              | `YYYY-MM-DDTHH:MM`                       | Hidden from list until this time              |
-| `idempotency_key:<key>`    | Any non-whitespace string                | Stable caller key for exact deduplication     |
-| `id:<id>`                  | 8-char alphanumeric                      | Auto-generated; always present after `add`    |
+| Component      | Format                                   | Notes                                         |
+|----------------|------------------------------------------|-----------------------------------------------|
+| `<status>`     | ` ` (space) or `x`                       | Space = open, `x` = done                      |
+| `<title>`      | Free text                                | Required. May contain spaces.                 |
+| `@<tag>`       | `@word`                                  | Multiple allowed. `(?:^|\s)@(\w+)` pattern.   |
+| `+<context>`   | `+word`                                  | Multiple allowed. `(?:^|\s)\+(\w+)` pattern.  |
+| `due:<date>`   | ISO 8601 date or datetime                | `due:2026-04-15` or `due:2026-04-15T09:00`    |
+| `priority:<n>` | Integer 1–4                              | 1=urgent, 2=high, 3=medium, 4=none (default)  |
+| `recur:<rule>` | `daily` / `weekly` / `monthly`           | Spawns next occurrence when task is completed |
+| `notify:<lead>`| `30m` / `2h` / `1d`                      | Lead time before due for notifications        |
+| `snooze:<dt>`  | `YYYY-MM-DDTHH:MM`                       | Hidden from list until this time              |
+| `id:<id>`      | 8-char alphanumeric                      | Auto-generated; always present after `add`    |
+
+Provenance fields (`idempotency_key`, `source`, `origin_id`, `origin_url`, `captured_at`, `edited_at`) are stored in `metadata.json`, not inline in tasks.md. This keeps task lines readable while giving agents a full audit trail.
 
 **Example — full mini-syntax**:
 
@@ -301,26 +328,31 @@ Every `--json` response is wrapped in a versioned envelope:
 
 ### Task JSON shape
 
-`to_dict()` returns all fields including `section`. This object appears as the `data` payload (or inside a `data` array) in command responses:
+Every `--json` command response merges the task fields with its sidecar metadata. This combined object appears as the `data` payload (or inside a `data` array) in command responses:
 
 ```json
 {
-  "id":       "ab3xy901",
-  "title":    "Weekly report",
-  "done":     false,
-  "tags":     ["work"],
-  "contexts": [],
-  "due":      "2026-04-18",
-  "priority": 2,
+  "id":               "ab3xy901",
+  "title":            "Weekly report",
+  "done":             false,
+  "tags":             ["work"],
+  "contexts":         [],
+  "due":              "2026-04-18",
+  "priority":         2,
   "recur":            "weekly",
   "notify":           "2h",
   "snooze":           null,
   "section":          "upcoming",
-  "idempotency_key":  null
+  "idempotency_key":  null,
+  "source":           "manual",
+  "origin_id":        null,
+  "origin_url":       null,
+  "captured_at":      null,
+  "edited_at":        null
 }
 ```
 
-All fields are always present. `null` indicates unset optional fields.
+All fields are always present. `null` indicates unset optional fields. `source` always defaults to `"manual"` even when no metadata entry exists.
 
 ---
 
@@ -355,6 +387,14 @@ mdone add [OPTIONS] TASK_STRING
 | `--dry-run`                   | Output parsed task as JSON without saving                             |
 | `--json`                      | Output created task as compact JSON after saving                      |
 | `--json-pretty`               | Output as indented JSON (for humans; implies `--json`)                |
+| `--dedup`                     | Reject add if a duplicate is detected (exit 4). Checks `idempotency_key` first, then fuzzy title similarity. |
+| `--idempotency-key KEY`       | Stable caller-provided key for exact deduplication. Stored in metadata, not inline. |
+| `--check-archive`             | Extend dedup scope to archived (completed) tasks                      |
+| `--force`                     | Add even if `--dedup` would reject it                                 |
+| `--source SOURCE`             | Where the task originated. Freeform; examples: `slack`, `email`, `github`, `meeting`, `api`, `manual` (default). Immutable. |
+| `--origin-id ID`              | Stable identifier in the source system (e.g. Slack message ID). Immutable. |
+| `--origin-url URL`            | Link back to the originating message or record. Immutable.            |
+| `--captured-at ISO8601`       | When the original event occurred (ISO 8601, set by agent). Immutable. |
 
 **Section assignment**
 
@@ -586,6 +626,8 @@ mdone edit [OPTIONS] TASK_ID [TASK_STRING]
 | `notify`   | `30m` / `2h` / `1d`                                                    |
 | `snooze`   | `30m` / `2h` / `1d` (converted to absolute datetime)                   |
 | `section`  | `inbox` / `today` / `upcoming` / `someday` / `waiting`                 |
+
+Provenance fields (`source`, `origin_id`, `origin_url`, `captured_at`, `idempotency_key`) are immutable — they cannot be changed via `edit`. `edited_at` is set automatically in `metadata.json` on every successful edit.
 
 **Examples**:
 
@@ -912,16 +954,32 @@ mdone search [OPTIONS] QUERY
 | `--archive`           | Also search completed tasks in archive.md              |
 | `--tag`, `-t TAG`     | Restrict results to tasks with this @tag               |
 | `--priority`, `-p N`  | Restrict results to tasks with this priority           |
+| `--similar`           | Fuzzy title-similarity search instead of keyword search |
 | `--json`              | Output results as compact JSON                         |
 | `--json-pretty`       | Output as indented JSON (for humans; implies `--json`) |
 
-**`--json` output**:
+**Keyword `--json` output**:
 
 ```json
 {"schema_version":1,"data":[{"score":6,"matched_fields":["title","tags"],"task":{"id":"...","title":"...","section":"today",...}}]}
 ```
 
 Results are sorted by descending score, then alphabetically by title. Exit code `3` with no `--json` if no results.
+
+**Fuzzy `--similar` mode**: uses Jaccard similarity on title token sets. Returns tasks with any token overlap, ranked by score. Useful for finding near-duplicates before adding a task.
+
+```bash
+mdone search "fix login" --similar
+mdone search "invoice payment" --similar --archive --json
+```
+
+**`--similar --json` output**:
+
+```json
+{"schema_version":1,"data":[{"score":0.667,"task":{"id":"...","title":"Fix login bug",...}}]}
+```
+
+`matched_fields` is not present in `--similar` output (scores replace it). Exit code `3` when no similar tasks are found.
 
 ---
 
@@ -1363,6 +1421,80 @@ mdone config --init
 - Check exit codes: `0` = success, `1` = not found, `2` = bad input, `3` = no results
 - IDs are stable — store them when referencing tasks across calls
 - Every task JSON object includes `section` — use it to understand where a task sits
+
+### Pattern: Deduplication (idempotent capture)
+
+Use `--dedup` to make task capture idempotent. The caller supplies a stable `--idempotency-key` (exact match) or relies on fuzzy title similarity (Jaccard ≥ 0.5). Exit code `4` means a duplicate was found; `0` means the task was created.
+
+```bash
+# Exact key — safe to call repeatedly from the same event source
+mdone add "Follow up with Alice" --dedup --idempotency-key "slack-C123-msg456" --json
+# → exit 0 (created) or exit 4 (already exists — returns the existing task)
+
+# Fuzzy only — useful when you don't have a stable key
+mdone add "Fix login bug" --dedup --json
+
+# Force past dedup (create regardless)
+mdone add "Fix login bug" --dedup --force --json
+
+# Check completed tasks too
+mdone add "Fix login bug" --dedup --idempotency-key "key-001" --check-archive --json
+```
+
+**Duplicate JSON response** (exit 4):
+
+```json
+{"schema_version":1,"data":{"result":"duplicate","task":{...existing task...},"similar":[]}}
+```
+
+**Created JSON response** (exit 0):
+
+```json
+{"schema_version":1,"data":{"result":"created","task":{...new task...},"similar":[]}}
+```
+
+`similar` lists any fuzzy matches (with scores) that were overridden when `--force` is used.
+
+### Pattern: Provenance — capture where a task came from
+
+Set provenance fields at capture time. They are immutable after creation and visible in all `--json` responses as part of the task object.
+
+```bash
+# Capture from Slack
+mdone add "Review Alice's PR" \
+  --source slack \
+  --origin-id "C123456-msg-789" \
+  --origin-url "https://yourteam.slack.com/archives/C123456/p1234567890" \
+  --captured-at "2026-05-03T10:00:00Z" \
+  --idempotency-key "slack-C123456-msg-789" \
+  --dedup --json
+
+# Capture from email
+mdone add "Reply to vendor invoice" \
+  --source email \
+  --origin-id "msg-abc123@mail.example.com" \
+  --captured-at "2026-05-03T09:15:00Z" \
+  --json
+
+# Capture from GitHub
+mdone add "Fix null pointer in auth service" \
+  --source github \
+  --origin-id "issue-4321" \
+  --origin-url "https://github.com/org/repo/issues/4321" \
+  --captured-at "2026-05-02T14:30:00Z" \
+  --dedup --idempotency-key "gh-issue-4321" --json
+```
+
+**Provenance fields in JSON output** (always present):
+
+| Field             | Set by    | Mutable | Description                                     |
+|-------------------|-----------|---------|-------------------------------------------------|
+| `source`          | `add`     | No      | Origin system. Defaults to `"manual"`.           |
+| `origin_id`       | `add`     | No      | Stable ID in the source system                  |
+| `origin_url`      | `add`     | No      | Link back to the originating record             |
+| `captured_at`     | `add`     | No      | When the original event occurred (ISO 8601)     |
+| `idempotency_key` | `add`     | No      | Stable key for exact dedup                      |
+| `edited_at`       | automatic | Yes     | Updated on every `edit`; `null` until first edit|
 
 ### Pattern: Add a task safely
 

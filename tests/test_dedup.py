@@ -7,6 +7,7 @@ import pytest
 from click.testing import CliRunner
 from todo.cli import cli, SCHEMA_VERSION
 from todo.storage import add_task, read_tasks
+from todo.metadata import get_task_meta, read_all_meta
 from todo.models import Task
 from todo.dedup import _tokens, _jaccard, similar_tasks, find_by_idempotency_key, DEDUP_THRESHOLD
 
@@ -139,20 +140,16 @@ class TestFindByIdempotencyKey:
 # ---------------------------------------------------------------------------
 
 class TestIdempotencyKeyField:
-    def test_mini_syntax_parsed(self, runner):
-        data = _add(runner, "Fix bug idempotency_key:fix-bug-001")
-        assert data["idempotency_key"] == "fix-bug-001"
-
     def test_flag_sets_key(self, runner):
         data = _add(runner, "Fix bug", extra_args=["--idempotency-key", "fix-bug-001"])
         assert data["idempotency_key"] == "fix-bug-001"
 
-    def test_flag_overrides_inline(self, runner):
-        data = _add(runner, "Fix bug idempotency_key:inline",
-                    extra_args=["--idempotency-key", "from-flag"])
-        assert data["idempotency_key"] == "from-flag"
+    def test_key_persisted_to_metadata(self, runner):
+        result = _add(runner, "Fix bug", extra_args=["--idempotency-key", "key-001"])
+        meta = get_task_meta(result["id"])
+        assert meta.get("idempotency_key") == "key-001"
 
-    def test_key_persisted_to_disk(self, runner):
+    def test_key_accessible_via_read_tasks(self, runner):
         _add(runner, "Fix bug", extra_args=["--idempotency-key", "key-001"])
         tasks = read_tasks()
         assert tasks[0].idempotency_key == "key-001"
@@ -161,14 +158,42 @@ class TestIdempotencyKeyField:
         data = _add(runner, "Fix bug")
         assert data["idempotency_key"] is None
 
-    def test_edit_set_idempotency_key(self, runner):
+    def test_source_defaults_to_manual(self, runner):
         data = _add(runner, "Fix bug")
-        result = runner.invoke(
-            cli, ["edit", data["id"], "--set", "idempotency_key:key-edit", "--json"]
-        )
-        assert result.exit_code == 0
-        updated = _unwrap(result.output)
-        assert updated["idempotency_key"] == "key-edit"
+        assert data["source"] == "manual"
+
+    def test_provenance_flags_stored(self, runner):
+        result = _add(runner, "Fix bug", extra_args=[
+            "--source", "slack",
+            "--origin-id", "msg-001",
+            "--origin-url", "https://example.com/msg/001",
+            "--captured-at", "2026-05-03T10:00:00Z",
+        ])
+        assert result["source"] == "slack"
+        assert result["origin_id"] == "msg-001"
+        assert result["origin_url"] == "https://example.com/msg/001"
+        assert result["captured_at"] == "2026-05-03T10:00:00Z"
+
+    def test_provenance_immutable_after_edit(self, runner):
+        data = _add(runner, "Fix bug", extra_args=["--source", "slack"])
+        runner.invoke(cli, ["edit", data["id"], "--set", "priority:1"])
+        meta = get_task_meta(data["id"])
+        assert meta.get("source") == "slack"
+
+    def test_edited_at_set_after_edit(self, runner):
+        data = _add(runner, "Fix bug")
+        runner.invoke(cli, ["edit", data["id"], "--set", "priority:1"])
+        meta = get_task_meta(data["id"])
+        assert meta.get("edited_at") is not None
+
+    def test_edited_at_null_before_edit(self, runner):
+        data = _add(runner, "Fix bug")
+        assert data["edited_at"] is None
+
+    def test_metadata_deleted_on_task_delete(self, runner):
+        data = _add(runner, "Fix bug", extra_args=["--source", "slack"])
+        runner.invoke(cli, ["delete", data["id"]])
+        assert get_task_meta(data["id"]) == {}
 
 
 # ---------------------------------------------------------------------------

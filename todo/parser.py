@@ -17,13 +17,12 @@ _TASK_LINE_RE = re.compile(r"^- \[([ x])\] (.+)$")
 
 # Key:value fields — matched and stripped to recover the plain title
 _FIELD_RE = {
-    "id":               re.compile(r"\bid:([A-Za-z0-9]+)"),
-    "due":              re.compile(r"\bdue:(\S+)"),
-    "recur":            re.compile(r"\brecur:(\S+)"),
-    "priority":         re.compile(r"\bpriority:([1-4])"),
-    "notify":           re.compile(r"\bnotify:(\S+)"),
-    "snooze":           re.compile(r"\bsnooze:(\S+)"),
-    "idempotency_key":  re.compile(r"\bidempotency_key:(\S+)"),
+    "id":       re.compile(r"\bid:([A-Za-z0-9]+)"),
+    "due":      re.compile(r"\bdue:(\S+)"),
+    "recur":    re.compile(r"\brecur:(\S+)"),
+    "priority": re.compile(r"\bpriority:([1-4])"),
+    "notify":   re.compile(r"\bnotify:(\S+)"),
+    "snooze":   re.compile(r"\bsnooze:(\S+)"),
 }
 
 # Inline tokens — may include leading whitespace in the match so stripping
@@ -76,7 +75,6 @@ def parse_line(line: str) -> Optional[Task]:
         priority=int(fields["priority"]) if fields["priority"] else 4,
         notify=fields["notify"],
         snooze=fields["snooze"],
-        idempotency_key=fields["idempotency_key"],
     )
 
 
@@ -99,8 +97,6 @@ def serialize_task(task: Task) -> str:
         parts.append(f"notify:{task.notify}")
     if task.snooze:
         parts.append(f"snooze:{task.snooze}")
-    if task.idempotency_key:
-        parts.append(f"idempotency_key:{task.idempotency_key}")
     parts.append(f"id:{task.id}")
 
     return f"- [{checkbox}] {' '.join(parts)}"
