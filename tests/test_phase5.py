@@ -93,8 +93,9 @@ class TestDryRunEdit:
         d = _add(runner, "Original title")
         result = runner.invoke(cli, ["edit", d["id"], "New title", "--dry-run"])
         data = _unwrap(result.output)
-        assert data["title"] == "New title"
-        assert data["id"] == d["id"]
+        assert data["action"] == "edit"
+        assert data["after"]["title"] == "New title"
+        assert data["after"]["id"] == d["id"]
 
     def test_dry_run_set_field_preview(self, runner):
         d = _add(runner, "Task")
@@ -102,7 +103,7 @@ class TestDryRunEdit:
             cli, ["edit", d["id"], "--set", "priority:1", "--dry-run"]
         )
         data = _unwrap(result.output)
-        assert data["priority"] == 1
+        assert data["after"]["priority"] == 1
         # Still priority 4 on disk
         assert read_tasks()[0].priority == 4
 

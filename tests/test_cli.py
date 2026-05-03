@@ -602,7 +602,9 @@ class TestNaturalLanguageAdd:
                 cli, ["add", "-n", "buy groceries", "--dry-run"]
             )
         assert result.exit_code == 0
-        assert _unwrap(result.output)["title"] == "Buy groceries"
+        data = _unwrap(result.output)
+        assert data["action"] == "add"
+        assert data["after"]["title"] == "Buy groceries"
         assert read_tasks() == []   # nothing saved
 
     def test_dry_run_mini_syntax(self, runner):
@@ -612,8 +614,9 @@ class TestNaturalLanguageAdd:
         )
         assert result.exit_code == 0
         data = _unwrap(result.output)
-        assert data["title"] == "Review docs"
-        assert data["priority"] == 2
+        assert data["action"] == "add"
+        assert data["after"]["title"] == "Review docs"
+        assert data["after"]["priority"] == 2
         assert read_tasks() == []
 
     def test_natural_json_output(self, runner):

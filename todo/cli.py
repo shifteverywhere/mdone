@@ -10,6 +10,7 @@ Exit codes:
 """
 
 import json
+import re
 import sys
 import time
 from datetime import date, timedelta
@@ -180,6 +181,168 @@ def _auto_section(task) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Structured dry-run diff helpers
+# ---------------------------------------------------------------------------
+
+# Field-like tokens we recognise in mini-syntax (used to detect unrecognised ones)
+_KNOWN_MINI_FIELDS = frozenset({"due", "priority", "recur", "notify", "snooze", "id"})
+# Matches word:value tokens that look like they could be fields
+_FIELD_LIKE_RE = re.compile(r'\b([a-z][a-z_]{2,}):(\S+)')
+
+
+def _build_dry_run_payload(action: str, before, after: dict,
+                           changes: list, warnings: list, ambiguities: list) -> dict:
+    return {
+        "dry_run": True,
+        "action": action,
+        "before": before,
+        "after": after,
+        "changes": changes,
+        "warnings": warnings,
+        "ambiguities": ambiguities,
+    }
+
+
+def _change(field: str, before, after, **extras) -> dict:
+    entry = {"field": field, "before": before, "after": after}
+    entry.update({k: v for k, v in extras.items() if v is not None})
+    return entry
+
+
+def _add_dry_run_diff(
+    task,
+    meta: dict,
+    raw_due,
+    natural: bool,
+    nlp_meta: dict,
+    raw_task_string: str,
+    explicit_section: bool,
+    config_tags_applied: list,
+    original_priority: int,
+    original_notify,
+) -> dict:
+    """Build the structured diff payload for `add --dry-run`."""
+    after = _merge_meta(task.to_dict(), meta)
+    changes = []
+
+    # title
+    if natural and task.title.lower() != raw_task_string.lower():
+        changes.append(_change("title", None, task.title, inferred_from=raw_task_string))
+    else:
+        changes.append(_change("title", None, task.title))
+
+    # section (always shown — tells the agent where the task lands)
+    if explicit_section:
+        changes.append(_change("section", None, task.section,
+                               reason="explicit --section flag"))
+    else:
+        reason = {
+            "today":    "due date is today or in the past",
+            "upcoming": "future due date",
+        }.get(task.section, "no due date")
+        changes.append(_change("section", None, task.section, reason=reason))
+
+    # due
+    if task.due:
+        if natural and nlp_meta.get("date_phrase"):
+            changes.append(_change("due", None, task.due,
+                                   inferred_from=nlp_meta["date_phrase"]))
+        elif raw_due and raw_due != task.due:
+            changes.append(_change("due", None, task.due, inferred_from=raw_due))
+        else:
+            changes.append(_change("due", None, task.due))
+
+    # priority (skip default 4 unless explicitly set or config-defaulted)
+    if task.priority != 4:
+        if natural and nlp_meta.get("priority_keyword"):
+            changes.append(_change("priority", None, task.priority,
+                                   inferred_from=nlp_meta["priority_keyword"]))
+        elif original_priority == 4:
+            changes.append(_change("priority", None, task.priority,
+                                   inferred_from="config default"))
+        else:
+            changes.append(_change("priority", None, task.priority))
+
+    # tags
+    if task.tags:
+        inferred_from = None
+        if natural and nlp_meta.get("tag_keywords"):
+            kw_map = nlp_meta["tag_keywords"]
+            inferred_from = ", ".join(f"{kw} → @{tag}" for tag, kw in kw_map.items())
+        elif config_tags_applied:
+            inferred_from = "config default: " + ", ".join(f"@{t}" for t in config_tags_applied)
+        changes.append(_change("tags", None, task.tags, inferred_from=inferred_from))
+
+    # recur / notify / snooze — only when set
+    if task.recur:
+        changes.append(_change("recur", None, task.recur))
+    if task.notify:
+        inf = "config default" if original_notify is None and task.notify else None
+        changes.append(_change("notify", None, task.notify, inferred_from=inf))
+
+    # notable metadata fields
+    if meta.get("idempotency_key"):
+        changes.append(_change("idempotency_key", None, meta["idempotency_key"]))
+    if meta.get("source", "manual") != "manual":
+        changes.append(_change("source", None, meta["source"]))
+    if meta.get("origin_id"):
+        changes.append(_change("origin_id", None, meta["origin_id"]))
+    if meta.get("origin_url"):
+        changes.append(_change("origin_url", None, meta["origin_url"]))
+    if meta.get("captured_at"):
+        changes.append(_change("captured_at", None, meta["captured_at"]))
+
+    # warnings
+    warnings = []
+    if task.due and task.due.split("T")[0] < date.today().isoformat():
+        warnings.append(f"due date '{task.due.split('T')[0]}' is in the past")
+    if not natural:
+        for m in _FIELD_LIKE_RE.finditer(raw_task_string):
+            key = m.group(1)
+            if key not in _KNOWN_MINI_FIELDS:
+                warnings.append(
+                    f"'{m.group(0)}' looks like a field but was not recognised "
+                    f"— treated as title text"
+                )
+
+    # ambiguities
+    ambiguities = []
+    if natural and nlp_meta.get("date_candidates", 0) > 1:
+        phrase = nlp_meta.get("date_phrase") or ""
+        ambiguities.append(
+            f"{nlp_meta['date_candidates']} date expressions found in input; "
+            f"used '{phrase}'"
+        )
+
+    return _build_dry_run_payload("add", None, after, changes, warnings, ambiguities)
+
+
+# Ordered list of task fields to compare in edit diffs
+_TASK_FIELDS = ["title", "due", "priority", "tags", "recur", "notify", "snooze", "section"]
+
+
+def _edit_dry_run_diff(before_dict: dict, after_task, raw_set_values: dict) -> dict:
+    """Build the structured diff payload for `edit --dry-run`."""
+    after_dict = _task_with_meta(after_task)
+    changes = []
+
+    for field in _TASK_FIELDS:
+        bv = before_dict.get(field)
+        av = after_dict.get(field)
+        if bv == av:
+            continue
+        raw = raw_set_values.get(field)
+        inferred_from = raw if (raw is not None and str(raw) != str(av)) else None
+        changes.append(_change(field, bv, av, inferred_from=inferred_from))
+
+    warnings = []
+    if after_task.due and after_task.due.split("T")[0] < date.today().isoformat():
+        warnings.append(f"due date '{after_task.due.split('T')[0]}' is in the past")
+
+    return _build_dry_run_payload("edit", before_dict, after_dict, changes, warnings, [])
+
+
+# ---------------------------------------------------------------------------
 # CLI group
 # ---------------------------------------------------------------------------
 
@@ -268,8 +431,16 @@ def cmd_add(task_string: str, natural: bool, section: str, dry_run: bool,
     as_json = as_json or json_pretty
     config = load_config()
 
+    # Capture raw due before normalization (mini-syntax only) for dry-run diff
+    raw_due = None
+    nlp_meta: dict = {}
+    if not natural:
+        raw_task = parse_line(f"- [ ] {task_string}")
+        raw_due = raw_task.due if raw_task else None
+
     if natural:
         parsed = parse_natural(task_string)
+        nlp_meta = parsed.pop("_meta", {})
         task = Task(
             title=parsed["title"],
             id=generate_id(),
@@ -281,15 +452,19 @@ def cmd_add(task_string: str, natural: bool, section: str, dry_run: bool,
         task = _parse_task_string(task_string)
         task.id = generate_id()
 
-    # Apply config defaults (only when not already set by the task string)
+    # Apply config defaults — track what changes for dry-run diff
     default_tags = get_default_tags(config)
+    config_tags_applied = []
     for dt in default_tags:
         if dt not in task.tags:
             task.tags.append(dt)
+            config_tags_applied.append(dt)
 
+    original_priority = task.priority
     if task.priority == 4:
         task.priority = get_default_priority(config)
 
+    original_notify = task.notify
     if task.notify is None:
         dn = get_default_notify(config)
         if dn:
@@ -369,7 +544,12 @@ def cmd_add(task_string: str, natural: bool, section: str, dry_run: bool,
             click.echo(f"Added [{task.section}]: {task.id}  {task.title}")
     else:
         if dry_run:
-            _json_out(_merge_meta(task.to_dict(), meta), pretty=json_pretty)
+            diff = _add_dry_run_diff(
+                task, meta, raw_due, natural, nlp_meta,
+                task_string, bool(section), config_tags_applied,
+                original_priority, original_notify,
+            )
+            _json_out(diff, pretty=json_pretty)
             return
         add_task(task)
         create_task_meta(task.id, meta)
@@ -601,14 +781,26 @@ def cmd_edit(task_id, task_string, set_fields, dry_run, as_json, json_pretty):
         click.echo(f"Error: task '{task_id}' not found.", err=True)
         sys.exit(1)
 
+    # Capture before state for dry-run diff
+    before_dict = _task_with_meta(task)
+
+    # Track raw --set values so we can detect normalization in the diff
+    raw_set_values: dict = {}
+
     if task_string:
+        raw_task = parse_line(f"- [ ] {task_string}")
+        raw_due = raw_task.due if raw_task else None
         updated = _parse_task_string(task_string)  # due normalised inside
         updated.id = task.id
         updated.done = task.done
         task = updated
+        # Treat full-replacement like --set for every changed field
+        if raw_due and raw_due != task.due:
+            raw_set_values["due"] = raw_due
 
     for field_expr in set_fields:
         key, _, value = field_expr.partition(":")
+        raw_set_values[key] = value
         if key == "priority":
             task.priority = int(value)
         elif key == "due":
@@ -631,10 +823,14 @@ def cmd_edit(task_id, task_string, set_fields, dry_run, as_json, json_pretty):
             click.echo(f"Error: unknown field '{key}'.", err=True)
             sys.exit(2)
 
-    if not dry_run:
-        update_task(task)
+    if dry_run:
+        diff = _edit_dry_run_diff(before_dict, task, raw_set_values)
+        _json_out(diff, pretty=json_pretty)
+        return
 
-    if as_json or dry_run:
+    update_task(task)
+
+    if as_json:
         _json_out(_task_with_meta(task), pretty=json_pretty)
     else:
         click.echo(f"Updated: {task.id}  {task.title}")

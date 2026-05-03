@@ -149,7 +149,7 @@ class TestAddSection:
         result = runner.invoke(cli, ["add", "Task", "--dry-run"])
         assert result.exit_code == 0
         data = _unwrap(result.output)
-        assert "section" in data
+        assert "section" in data["after"]
 
 
 # ---------------------------------------------------------------------------

@@ -81,6 +81,30 @@ def infer_tags(text: str) -> List[str]:
     return [tag for tag, kws in _TAG_KEYWORDS.items() if any(kw in padded for kw in kws)]
 
 
+def _find_priority_keyword(text: str, priority: int) -> Optional[str]:
+    """Return the first keyword that triggered the given priority, or None."""
+    lower = text.lower()
+    for p, phrases in _PRIORITY_PATTERNS:
+        if p == priority:
+            for phrase in phrases:
+                if phrase in lower:
+                    return phrase
+    return None
+
+
+def _find_tag_keywords(text: str, tags: List[str]) -> dict:
+    """Return {tag: first_matched_keyword} for each tag in tags."""
+    padded = f" {text.lower()} "
+    result = {}
+    for tag in tags:
+        kws = _TAG_KEYWORDS.get(tag, [])
+        for kw in kws:
+            if kw in padded:
+                result[tag] = kw
+                break
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Title-cleaning helpers
 # ---------------------------------------------------------------------------
@@ -162,6 +186,8 @@ def parse_natural(text: str) -> dict:
     """
     remaining = _strip_fillers(text)
     due_str: Optional[str] = None
+    date_phrase: Optional[str] = None
+    date_candidates: int = 0
 
     if _DATEPARSER_AVAILABLE and _search_dates is not None:
         results = _search_dates(
@@ -172,6 +198,7 @@ def parse_natural(text: str) -> dict:
             },
         ) or []
 
+        date_candidates = len(results)
         if results:
             date_phrase, parsed_dt = results[0]
             # Include time only when it is explicitly non-midnight
@@ -191,4 +218,10 @@ def parse_natural(text: str) -> dict:
         "due":      due_str,
         "priority": priority,
         "tags":     tags,
+        "_meta": {
+            "date_phrase":      date_phrase,
+            "date_candidates":  date_candidates,
+            "priority_keyword": _find_priority_keyword(text, priority) if priority != 4 else None,
+            "tag_keywords":     _find_tag_keywords(title, tags),
+        },
     }
