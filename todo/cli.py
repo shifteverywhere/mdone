@@ -26,6 +26,7 @@ from .storage import (
     archive_task,
     delete_task,
     find_task,
+    get_todo_dir,
     read_tasks,
     read_archive_tasks,
     update_task,
@@ -1117,6 +1118,152 @@ def cmd_organize(sort_by, dry_run, as_json, json_pretty):
             click.echo(f"\nMoved {len(moved)} task(s).")
         if sort_by:
             click.echo(f"Sorted by {sort_by} within sections.")
+
+
+# ---------------------------------------------------------------------------
+# doctor
+# ---------------------------------------------------------------------------
+
+@cli.command("doctor")
+@click.argument("task_id", required=False, default=None, metavar="[TASK_ID]")
+@click.option("--fix", is_flag=True,
+              help="Apply all safe repairs automatically")
+@click.option("--dry-run", is_flag=True,
+              help="Show what would be repaired without writing anything")
+@click.option("--json", "as_json", is_flag=True, help="Output as compact JSON")
+@click.option("--json-pretty", "json_pretty", is_flag=True,
+              help="Output as indented JSON")
+def cmd_doctor(task_id, fix, dry_run, as_json, json_pretty):
+    """Check tasks.md and metadata.json for issues, and optionally repair them.
+
+    \b
+    Checks performed:
+      malformed_date       due or snooze is not ISO 8601
+      malformed_notify     notify is not NNm / NNh / NNd
+      duplicate_id         two tasks share the same ID (keep first)
+      invalid_priority     priority outside 1–4
+      structural_orphan    task appears before any section header
+      invalid_recurrence   recur is not daily / weekly / monthly
+      orphaned_metadata    metadata.json entry has no corresponding task
+
+    \b
+    Exit codes:
+      0  no issues found (or all issues were fixed)
+      1  fixable issues found — run with --fix to repair
+      2  unfixable issues found — manual intervention required
+
+    \b
+    Examples:
+      mdone doctor                       # full check, report only
+      mdone doctor --fix                 # check and repair everything fixable
+      mdone doctor --fix --dry-run       # preview repairs without writing
+      mdone doctor abc12345              # check one task only
+      mdone doctor abc12345 --fix        # fix one task
+      mdone doctor --json                # machine-readable report
+    """
+    from .doctor import run_checks, apply_fixes
+    from .metadata import delete_task_meta
+
+    as_json = as_json or json_pretty
+
+    tasks = read_tasks()
+    archive_tasks = read_archive_tasks()
+    filepath = get_todo_dir() / "tasks.md"
+
+    if task_id and not any(t.id == task_id for t in tasks):
+        msg = f"Task '{task_id}' not found in tasks.md."
+        if as_json:
+            _json_out({"error": msg}, pretty=json_pretty)
+        else:
+            click.echo(f"Error: {msg}", err=True)
+        sys.exit(1)
+
+    issues = run_checks(tasks, filepath, archive_tasks, task_id=task_id)
+
+    if not issues:
+        if as_json:
+            _json_out({
+                "issues": [],
+                "summary": {"total": 0, "fixable": 0, "unfixable": 0, "fixed": 0},
+            }, pretty=json_pretty)
+        else:
+            click.echo("✓ No issues found.")
+        sys.exit(0)
+
+    # ------------------------------------------------------------------ fix
+    if fix or dry_run:
+        tasks, fixed, unfixable, orphaned_meta_ids = apply_fixes(issues, tasks)
+
+        if not dry_run:
+            write_tasks(tasks)
+            for mid in orphaned_meta_ids:
+                delete_task_meta(mid)
+
+        if as_json:
+            _json_out({
+                "issues":    [i.to_dict() for i in issues],
+                "fixed":     [i.to_dict() for i in fixed],
+                "unfixable": [i.to_dict() for i in unfixable],
+                "dry_run":   dry_run,
+                "summary": {
+                    "total":     len(issues),
+                    "fixable":   len(fixed) + len(unfixable),
+                    "unfixable": len(unfixable),
+                    "fixed":     0 if dry_run else len(fixed),
+                },
+            }, pretty=json_pretty)
+        else:
+            verb = "Would fix" if dry_run else "Fixed"
+            if fixed:
+                for i in fixed:
+                    click.echo(
+                        f"  {(i.task_id or '—'):10}  [{i.field}]"
+                        f"  {i.fix_description}"
+                    )
+                click.echo(f"\n{verb} {len(fixed)} issue(s).")
+            if unfixable:
+                click.echo()
+                for i in unfixable:
+                    click.echo(
+                        f"  {(i.task_id or '—'):10}  [{i.field}]"
+                        f"  ✗  {i.description}",
+                        err=True,
+                    )
+                click.echo(
+                    f"\n{len(unfixable)} issue(s) require manual intervention.",
+                    err=True,
+                )
+
+        sys.exit(2 if unfixable else 0)
+
+    # ------------------------------------------------------------ report only
+    fixable   = [i for i in issues if i.fixable]
+    unfixable = [i for i in issues if not i.fixable]
+
+    if as_json:
+        _json_out({
+            "issues": [i.to_dict() for i in issues],
+            "summary": {
+                "total":     len(issues),
+                "fixable":   len(fixable),
+                "unfixable": len(unfixable),
+                "fixed":     0,
+            },
+        }, pretty=json_pretty)
+    else:
+        scope = f" (task {task_id})" if task_id else ""
+        click.echo(f"Found {len(issues)} issue(s){scope}:\n")
+        for i in issues:
+            marker = "→" if i.fixable else "✗"
+            action = i.fix_description if i.fixable else "cannot fix automatically"
+            click.echo(f"  {(i.task_id or '—'):10}  [{i.field}]  {i.description}")
+            click.echo(f"  {'':10}  {marker} {action}\n")
+        if fixable:
+            click.echo(
+                f"{len(fixable)} fixable issue(s). "
+                "Run `mdone doctor --fix` to repair."
+            )
+    sys.exit(2 if unfixable else 1)
 
 
 # ---------------------------------------------------------------------------
