@@ -396,34 +396,36 @@ class TestDedupDryRun:
 # ---------------------------------------------------------------------------
 
 class TestSearchSimilar:
+    """Tests for search with --mode similar (Jaccard token overlap)."""
+
     def test_finds_similar_task(self, runner):
         add_task(Task(title="Fix login bug", id="aaa00001"))
-        result = runner.invoke(cli, ["search", "Fix login issue", "--similar"])
+        result = runner.invoke(cli, ["search", "Fix login issue", "--mode", "similar"])
         assert result.exit_code == 0
         assert "aaa00001" in result.output
 
     def test_no_match_exits_3(self, runner):
         add_task(Task(title="Buy groceries", id="aaa00001"))
-        result = runner.invoke(cli, ["search", "Fix login bug", "--similar"])
+        result = runner.invoke(cli, ["search", "Fix login bug", "--mode", "similar"])
         assert result.exit_code == 3
 
     def test_json_output_shape(self, runner):
         add_task(Task(title="Fix login bug", id="aaa00001"))
         result = runner.invoke(
-            cli, ["search", "Fix login issue", "--similar", "--json"]
+            cli, ["search", "Fix login issue", "--mode", "similar", "--json"]
         )
         assert result.exit_code == 0
         data = _unwrap(result.output)
         assert isinstance(data, list)
         assert "score" in data[0]
         assert "task" in data[0]
-        assert "matched_fields" not in data[0]  # similarity output, not keyword
+        assert "matched_fields" in data[0]   # all modes now report matched_fields
 
     def test_sorted_by_score(self, runner):
         add_task(Task(title="Fix login bug", id="aaa00001"))
         add_task(Task(title="Fix login bug report", id="bbb00002"))
         result = runner.invoke(
-            cli, ["search", "Fix login bug", "--similar", "--json"]
+            cli, ["search", "Fix login bug", "--mode", "similar", "--json"]
         )
         data = _unwrap(result.output)
         scores = [r["score"] for r in data]
@@ -433,7 +435,7 @@ class TestSearchSimilar:
         d = _add(runner, "Fix login bug")
         runner.invoke(cli, ["done", d["id"]])
         result = runner.invoke(
-            cli, ["search", "Fix login issue", "--similar", "--archive", "--json"]
+            cli, ["search", "Fix login issue", "--mode", "similar", "--archive", "--json"]
         )
         data = _unwrap(result.output)
         assert any(r["task"]["id"] == d["id"] for r in data)
@@ -442,7 +444,7 @@ class TestSearchSimilar:
         add_task(Task(title="Fix login bug", id="aaa00001", tags=["work"]))
         add_task(Task(title="Fix login bug", id="bbb00002", tags=["home"]))
         result = runner.invoke(
-            cli, ["search", "Fix login bug", "--similar", "--tag", "work", "--json"]
+            cli, ["search", "Fix login bug", "--mode", "similar", "--tag", "work", "--json"]
         )
         data = _unwrap(result.output)
         assert len(data) == 1

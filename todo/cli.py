@@ -1480,26 +1480,35 @@ def cmd_config(init, show, as_json, json_pretty):
 @click.option("--tag", "-t", default=None, help="Restrict to tasks with this @tag")
 @click.option("--priority", "-p", type=int, default=None,
               help="Restrict to tasks with this priority")
-@click.option("--similar", "fuzzy", is_flag=True,
-              help="Fuzzy title-similarity search instead of keyword search")
+@click.option(
+    "--mode",
+    type=click.Choice(["similar", "fuzzy", "exact"], case_sensitive=False),
+    default="similar",
+    show_default=True,
+    help=(
+        "Match mode: similar=Jaccard token overlap (default), "
+        "fuzzy=edit-distance typo-tolerance, exact=substring"
+    ),
+)
 @click.option("--json", "as_json", is_flag=True, help="Output as compact JSON")
 @click.option("--json-pretty", "json_pretty", is_flag=True,
               help="Output as indented JSON (for humans; implies --json)")
-def cmd_search(query, include_archive, tag, priority, fuzzy, as_json, json_pretty):
-    """Full-text search across tasks.
+def cmd_search(query, include_archive, tag, priority, mode, as_json, json_pretty):
+    """Search tasks by title and due date.
 
     \b
-      todo search "dentist"
-      todo search "bug" --tag work
-      todo search "report" --priority 1
-      todo search "old task" --archive
-      todo search "meeting" --json
+      mdone search "dentist"
+      mdone search "bug" --tag work
+      mdone search "report" --priority 1
+      mdone search "old task" --archive
+      mdone search "meeting" --json
 
-    Fuzzy similarity mode (--similar):
+    Match modes (--mode):
 
     \b
-      todo search "fix login" --similar           # ranked by title token overlap
-      todo search "invoice" --similar --archive   # include completed tasks
+      mdone search "fix login"            # similar: Jaccard token overlap (default)
+      mdone search "meeitng" --mode fuzzy # fuzzy:   tolerates typos via edit-distance
+      mdone search "2026-05" --mode exact # exact:   plain case-insensitive substring
     """
     as_json = as_json or json_pretty
     tasks = read_tasks()
@@ -1513,36 +1522,18 @@ def cmd_search(query, include_archive, tag, priority, fuzzy, as_json, json_prett
     if priority is not None:
         tasks = [t for t in tasks if t.priority == priority]
 
-    if fuzzy:
-        # Jaccard similarity — any non-zero score is included
-        candidates = similar_tasks(query, tasks, threshold=0.0)
-        # Filter to tasks that share at least one token with the query
-        candidates = [(s, t) for s, t in candidates if s > 0.0]
-
-        if as_json:
-            _json_out(
-                [{"score": round(s, 3), "task": _task_with_meta(t)} for s, t in candidates],
-                pretty=json_pretty,
-            )
-            return
-
-        if not candidates:
-            click.echo(f"No similar tasks found for '{query}'.")
-            sys.exit(3)
-
-        config = load_config()
-        date_fmt = get_date_format(config)
-        for score, t in candidates:
-            click.echo(f"[similarity:{score:.2f}]  {_task_row(t, date_fmt)}")
-        return
-
-    results = search_tasks(query, tasks)
+    results = search_tasks(query, tasks, mode=mode)
 
     if as_json:
         _json_out(
-            [{"score": r.score,
-              "matched_fields": r.matched_fields,
-              "task": _task_with_meta(r.task)} for r in results],
+            [
+                {
+                    "score": r.score,
+                    "matched_fields": r.matched_fields,
+                    "task": _task_with_meta(r.task),
+                }
+                for r in results
+            ],
             pretty=json_pretty,
         )
         return
@@ -1554,8 +1545,7 @@ def cmd_search(query, include_archive, tag, priority, fuzzy, as_json, json_prett
     config = load_config()
     date_fmt = get_date_format(config)
     for r in results:
-        matched = ", ".join(r.matched_fields)
-        click.echo(f"[score:{r.score} {matched}]  {_task_row(r.task, date_fmt)}")
+        click.echo(_task_row(r.task, date_fmt))
 
 
 # ---------------------------------------------------------------------------
