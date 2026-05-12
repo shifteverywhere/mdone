@@ -416,10 +416,10 @@ class TestSearchSimilar:
         )
         assert result.exit_code == 0
         data = _unwrap(result.output)
-        assert isinstance(data, list)
-        assert "score" in data[0]
-        assert "task" in data[0]
-        assert "matched_fields" in data[0]   # all modes now report matched_fields
+        assert "results" in data
+        assert "score" in data["results"][0]
+        assert "task" in data["results"][0]
+        assert "matched_fields" in data["results"][0]
 
     def test_sorted_by_score(self, runner):
         add_task(Task(title="Fix login bug", id="aaa00001"))
@@ -428,7 +428,7 @@ class TestSearchSimilar:
             cli, ["search", "Fix login bug", "--mode", "similar", "--json"]
         )
         data = _unwrap(result.output)
-        scores = [r["score"] for r in data]
+        scores = [r["score"] for r in data["results"]]
         assert scores == sorted(scores, reverse=True)
 
     def test_similar_includes_archive(self, runner):
@@ -438,7 +438,7 @@ class TestSearchSimilar:
             cli, ["search", "Fix login issue", "--mode", "similar", "--archive", "--json"]
         )
         data = _unwrap(result.output)
-        assert any(r["task"]["id"] == d["id"] for r in data)
+        assert any(r["task"]["id"] == d["id"] for r in data["results"])
 
     def test_similar_tag_filter(self, runner):
         add_task(Task(title="Fix login bug", id="aaa00001", tags=["work"]))
@@ -447,5 +447,5 @@ class TestSearchSimilar:
             cli, ["search", "Fix login bug", "--mode", "similar", "--tag", "work", "--json"]
         )
         data = _unwrap(result.output)
-        assert len(data) == 1
-        assert data[0]["task"]["id"] == "aaa00001"
+        assert len(data["results"]) == 1
+        assert data["results"][0]["task"]["id"] == "aaa00001"

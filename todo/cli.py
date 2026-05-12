@@ -53,7 +53,8 @@ from .config import (
     get_date_format,
     write_default_config,
 )
-from .search import search_tasks
+from .search import search_tasks, SearchResult
+from .query import parse_query, apply_filters
 from .completions import detect_shell, get_script, install as install_completions
 
 # Increment when the JSON envelope or any command's data shape changes.
@@ -1494,46 +1495,87 @@ def cmd_config(init, show, as_json, json_pretty):
 @click.option("--json-pretty", "json_pretty", is_flag=True,
               help="Output as indented JSON (for humans; implies --json)")
 def cmd_search(query, include_archive, tag, priority, mode, as_json, json_pretty):
-    """Search tasks by title and due date.
+    """Search tasks by title and due date with normalized, field-aware matching.
 
     \b
       mdone search "dentist"
       mdone search "bug" --tag work
-      mdone search "report" --priority 1
       mdone search "old task" --archive
       mdone search "meeting" --json
 
     Match modes (--mode):
 
     \b
-      mdone search "fix login"            # similar: Jaccard token overlap (default)
-      mdone search "meeitng" --mode fuzzy # fuzzy:   tolerates typos via edit-distance
-      mdone search "2026-05" --mode exact # exact:   plain case-insensitive substring
+      mdone search "fix login"               # similar: Jaccard token overlap (default)
+      mdone search "meeitng" --mode fuzzy    # fuzzy:   edit-distance typo tolerance
+      mdone search "2026-05" --mode exact    # exact:   substring match
+
+    Structured query syntax (parsed automatically):
+
+    \b
+      mdone search "@work meeting"           # tag filter + title match
+      mdone search "due tomorrow report"     # due-date filter + residual search
+      mdone search "overdue invoices"        # overdue filter + title match
+      mdone search "p1 login bug"            # priority filter + title match
+      mdone search "in waiting vendor"       # section filter + title match
+
+    Implicit aliases (additive — also search title):
+
+    \b
+      mdone search "work"                    # title match + tasks tagged @work
+      mdone search "high priority task"      # title match + priority-1 tasks
+      mdone search "waiting vendor"          # title match + tasks in Waiting section
+      mdone search "follow-up"              # matches "followup", "follow-up", etc.
     """
     as_json = as_json or json_pretty
-    tasks = read_tasks()
 
+    # ------------------------------------------------------------------ #
+    # 1. Parse the raw query into structured filters + residual text      #
+    # ------------------------------------------------------------------ #
+    parsed = parse_query(query)
+
+    # ------------------------------------------------------------------ #
+    # 2. Load tasks and apply hard filters                                #
+    #    CLI-level flags (--tag, --priority) override query-embedded ones #
+    # ------------------------------------------------------------------ #
+    tasks = read_tasks()
     if include_archive:
         tasks = tasks + read_archive_tasks()
 
-    # Pre-filter by tag / priority before scoring
-    if tag:
-        tasks = [t for t in tasks if tag in t.tags]
-    if priority is not None:
-        tasks = [t for t in tasks if t.priority == priority]
+    tasks = apply_filters(tasks, parsed, cli_tag=tag, cli_priority=priority)
 
-    results = search_tasks(query, tasks, mode=mode)
+    # ------------------------------------------------------------------ #
+    # 3. Score — run text matching on the residual query + hint matching  #
+    # ------------------------------------------------------------------ #
+    if parsed.residual:
+        results = search_tasks(
+            parsed.residual, tasks, mode=mode, hints=parsed.hints
+        )
+    else:
+        # Query was entirely structural (e.g. "@work p1"):
+        # return every task that passed the hard filters at full confidence.
+        results = [
+            SearchResult(task=t, score=1.0, matched_fields=["filter"])
+            for t in tasks
+        ]
 
+    # ------------------------------------------------------------------ #
+    # 4. Output                                                           #
+    # ------------------------------------------------------------------ #
     if as_json:
         _json_out(
-            [
-                {
-                    "score": r.score,
-                    "matched_fields": r.matched_fields,
-                    "task": _task_with_meta(r.task),
-                }
-                for r in results
-            ],
+            {
+                "match_mode": mode,
+                **parsed.to_report(),
+                "results": [
+                    {
+                        "score": r.score,
+                        "matched_fields": r.matched_fields,
+                        "task": _task_with_meta(r.task),
+                    }
+                    for r in results
+                ],
+            },
             pretty=json_pretty,
         )
         return
