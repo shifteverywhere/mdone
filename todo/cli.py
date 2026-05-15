@@ -870,6 +870,9 @@ def cmd_snooze(task_id, duration, clear, dry_run, as_json, json_pretty):
         task.snooze = None
         if not dry_run:
             update_task(task)
+            # Re-arm notifications so the task notifies again now that
+            # the snooze is lifted.
+            reset_notified(task.id)
         if as_json or dry_run:
             _json_out(_task_with_meta(task), pretty=json_pretty)
         else:
@@ -888,6 +891,9 @@ def cmd_snooze(task_id, duration, clear, dry_run, as_json, json_pretty):
 
     if not dry_run:
         update_task(task)
+        # Clear the notified state so the task re-notifies after the snooze
+        # period expires and the task becomes visible again.
+        reset_notified(task.id)
 
     if as_json or dry_run:
         _json_out(_task_with_meta(task), pretty=json_pretty)

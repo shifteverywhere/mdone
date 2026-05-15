@@ -68,6 +68,11 @@ _DEFAULTS: dict = {
         # Daemon poll interval in seconds
         "poll_interval": 60,
 
+        # Quiet hours window — no notifications are sent during this period.
+        # Format: "HH:MM-HH:MM" (24-hour).  Cross-midnight ranges are supported
+        # (e.g. "22:00-08:00").  Set to "" to disable.
+        "quiet_hours": "",
+
         "email":   {},
         "slack":   {},
         "webhook": {},
@@ -138,6 +143,11 @@ def get_date_format(config: dict) -> str:
     return config.get("general", {}).get("date_format", "%Y-%m-%d")
 
 
+def get_quiet_hours(config: dict) -> str:
+    """Return the quiet-hours window string (e.g. '22:00-08:00'), or '' if unset."""
+    return config.get("notifications", {}).get("quiet_hours", "")
+
+
 # ── Config file template ─────────────────────────────────────────────────────
 
 def write_default_config() -> Path:
@@ -177,6 +187,10 @@ backend        = "stdout"
 default_notify = ""
 # Daemon poll interval in seconds
 poll_interval  = 60
+# Quiet hours: suppress notifications during this window.
+# Format: "HH:MM-HH:MM" (24-hour clock, cross-midnight supported).
+# quiet_hours = "22:00-08:00"
+quiet_hours    = ""
 
 # ── Email (SMTP) ─────────────────────────────────────────────────────────────
 # [notifications.email]

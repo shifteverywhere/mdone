@@ -33,7 +33,7 @@ from .storage import DEFAULT_SECTION
 
 VALID_RECURRENCE = frozenset({"daily", "weekly", "monthly"})
 
-_NOTIFY_RE = re.compile(r"^\d+[mhd]$")
+_NOTIFY_RE = re.compile(r"^\d+[mhd](,\d+[mhd])*$")
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$")
 _NOTIFY_LOOSE_RE = re.compile(
     r"^(\d+)\s*(m(?:in(?:utes?)?)?|h(?:ours?)?|d(?:ays?)?)$",
@@ -109,16 +109,23 @@ def _try_normalize_date(value: str) -> Optional[str]:
 
 
 def _normalize_notify(value: str) -> Optional[str]:
-    """Try to normalize a loose notify string to NNm / NNh / NNd.
+    """Try to normalize a loose notify string to NNm / NNh / NNd (or comma-separated).
 
-    Returns the normalized form, or None if the value cannot be salvaged
-    (in which case the caller should remove the field).
+    Accepts comma-separated values such as "30 min, 2 hours, 1d".
+    Returns the normalized form, or None if any part cannot be salvaged
+    (in which case the caller should remove the field entirely).
     """
-    m = _NOTIFY_LOOSE_RE.match(value.strip())
-    if m:
+    parts = [p.strip() for p in value.strip().split(",") if p.strip()]
+    if not parts:
+        return None
+    normalized = []
+    for part in parts:
+        m = _NOTIFY_LOOSE_RE.match(part)
+        if not m:
+            return None  # any unrecognised part → give up on the whole value
         unit = m.group(2)[0].lower()  # 'm', 'h', or 'd'
-        return f"{m.group(1)}{unit}"
-    return None
+        normalized.append(f"{m.group(1)}{unit}")
+    return ",".join(normalized)
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +175,10 @@ def check_malformed_notify(tasks: List[Task]) -> List[Issue]:
             issues.append(Issue(
                 task_id=task.id, field="notify",
                 issue_type="malformed_notify",
-                description=f"notify '{val}' is not in NNm / NNh / NNd format",
+                description=(
+                    f"notify '{val}' is not in NNm / NNh / NNd "
+                    "(or comma-separated) format"
+                ),
                 fixable=True,
                 fix_description=f"normalize to '{normalized}'",
                 before=val, after=normalized,

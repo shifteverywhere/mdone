@@ -82,7 +82,7 @@ class TestNotifyCheck:
         result = runner.invoke(cli, ["notify", "--check", "--json"])
         p = _unwrap(result.output)[0]
         for field in ("id", "title", "due", "priority", "tags",
-                      "overdue", "minutes_until_due"):
+                      "overdue", "minutes_until_due", "offset", "notify_key"):
             assert field in p
 
     def test_check_human_output(self, runner):
